@@ -1,0 +1,128 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.call_leads_app">
+
+    <!-- ============================
+         PERMISSIONS
+    ============================= -->
+
+    <!-- Phone + call state -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+
+    <!-- Call logs for history -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+
+    <!-- Outgoing call detection (deprecated but needed for older Android) -->
+    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
+
+    <!-- Foreground service (Android 12+) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+
+    <!-- Notifications (Android 13+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- For autostart after reboot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Allow showing alert dialogs when app is backgrounded -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- ============================
+         QUERY INTENTS (Android 11+)
+    ============================= -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.PHONE_STATE" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.CALL" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+        </intent>
+    </queries>
+
+    <!-- ============================
+         APPLICATION
+    ============================= -->
+    <application
+        android:name="${applicationName}"
+        android:label="Call Leads"
+        android:icon="@mipmap/ic_launcher"
+        android:enableOnBackInvokedCallback="true"
+        android:usesCleartextTraffic="true">
+
+        <!-- ============================
+             MAIN ACTIVITY
+        ============================= -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/LaunchTheme"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenLayout|density|keyboardHidden|keyboard|smallestScreenSize|uiMode|screenSize|fontScale|layoutDirection">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ============================
+             CALL SERVICE
+        ============================= -->
+        <service
+            android:name=".callservice.CallService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall" />
+
+        <!-- ============================
+             OUTGOING CALL RECEIVER
+        ============================= -->
+        <receiver
+            android:name=".callservice.OutgoingReceiver"
+            android:enabled="true"
+            android:exported="true">
+
+            <!-- Works until Android 11 -->
+            <intent-filter android:priority="999">
+                <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
+            </intent-filter>
+
+            <!-- Required for Android 12/13/14 on Realme/Oppo -->
+            <intent-filter>
+                <action android:name="android.intent.action.CALL" />
+                <action android:name="android.intent.action.DIAL" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ============================
+             INCOMING CALL RECEIVER
+        ============================= -->
+        <receiver
+            android:name=".callservice.IncomingReceiver"
+            android:enabled="true"
+            android:exported="true">
+
+            <intent-filter android:priority="999">
+                <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+
+            <!-- Handles Android 12+ background restrictions -->
+            <intent-filter>
+                <action android:name="android.intent.action.ANSWER" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Flutter embedding -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+    </application>
+</manifest>
