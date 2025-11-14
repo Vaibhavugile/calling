@@ -31,11 +31,24 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
     super.dispose();
   }
 
+  // Reloads lead from service cache/storage to get updated details
   Future<void> _reloadLead() async {
     final refreshed = _service.findByPhone(_lead.phoneNumber);
     if (refreshed != null) {
       setState(() => _lead = refreshed);
     }
+  }
+
+  void _editLead() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LeadFormScreen(lead: _lead),
+      ),
+    ).then((_) {
+      // Reload the lead data after returning from the form
+      _reloadLead();
+    });
   }
 
   Future<void> _addNote() async {
@@ -49,168 +62,166 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
     });
   }
 
-  Future<void> _openEdit() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => LeadFormScreen(lead: _lead)),
-    );
-    await _reloadLead();
-  }
-
-  // Format DateTime safely
-  String _formatDateTime(DateTime dt) {
+  // -----------------------------------------
+  // UTIL: DATE FORMATTER
+  // -----------------------------------------
+  String _formatDate(DateTime dt) {
     final d = dt.toLocal();
-    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} "
+    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}  "
         "${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}";
   }
 
+  // -----------------------------------------
+  // UI: HEADER CARD
+  // -----------------------------------------
   Widget _headerCard() {
-    final avatarChar = _lead.name.isNotEmpty
-        ? _lead.name[0].toUpperCase()
-        : (_lead.phoneNumber.isNotEmpty ? _lead.phoneNumber[0] : '#');
-
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFF4A90E2), Color(0xFF6FB1FC)],
-        ),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Row(
-        children: [
-          CircleAvatar(
-            radius: 34,
-            backgroundColor: Colors.white24,
-            child: Text(avatarChar,
-                style: const TextStyle(fontSize: 28, color: Colors.white)),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _lead.name.isEmpty ? "No Name" : _lead.name,
+              style: const TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
               children: [
+                const Icon(Icons.phone, size: 18, color: Colors.blueGrey),
+                const SizedBox(width: 8),
                 Text(
-                  _lead.name.isEmpty ? "(No name)" : _lead.name,
-                  style: const TextStyle(
-                      fontSize: 20,
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    const Icon(Icons.phone, size: 18, color: Colors.white70),
-                    const SizedBox(width: 6),
-                    Text(
-                      _lead.phoneNumber,
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    _lead.status,
-                    style: const TextStyle(
-                        color: Colors.white, fontWeight: FontWeight.w600),
+                  _lead.phoneNumber,
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: Colors.blueGrey.shade700,
                   ),
                 ),
               ],
             ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.edit, color: Colors.white),
-            onPressed: _openEdit,
-          )
-        ],
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.indigo.shade100,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                _lead.status.toUpperCase(),
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.indigo.shade800,
+                ),
+              ),
+            ),
+            
+            // 🔥 NEW: Display last call outcome
+            if (_lead.lastCallOutcome != 'none') ...[
+              const SizedBox(height: 8),
+              Text(
+                'Last Call: ${_lead.lastCallOutcome.toUpperCase()}',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: _lead.lastCallOutcome == 'missed' ? Colors.red : Colors.green.shade700,
+                ),
+              ),
+            ],
+            
+            const SizedBox(height: 12),
+            Text(
+              "Last updated: ${_formatDate(_lead.lastUpdated)}",
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
+        ),
       ),
     );
   }
 
+  // -----------------------------------------
+  // UI: CALL HISTORY
+  // -----------------------------------------
   Widget _callHistory() {
     if (_lead.callHistory.isEmpty) {
       return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 10),
-        child: Text("No call history yet", style: TextStyle(color: Colors.grey)),
+        padding: EdgeInsets.only(top: 8.0),
+        // 🔥 MODIFIED: Clarify that only final outcomes are logged
+        child: Text("No call history recorded (only final outcome logged)."), 
       );
     }
 
-    final calls = _lead.callHistory.reversed.toList();
-
     return Column(
-      children: calls.map((c) {
-        IconData icon;
-        Color color;
-
-        switch (c.direction) {
-          case "inbound":
-            icon = Icons.call_received;
-            color = Colors.green;
-            break;
-          case "outbound":
-          case "outgoing":
-            icon = Icons.call_made;
-            color = Colors.blue;
-            break;
-          default:
-            icon = Icons.phone;
-            color = Colors.grey;
-        }
-
+      children: _lead.callHistory.reversed.map((call) {
+        final icon = call.direction == "inbound" ? Icons.call_received : Icons.call_made;
+        final color = call.outcome == "answered" ? Colors.green : 
+                      call.outcome == "missed" ? Colors.red : 
+                      call.outcome == "rejected" ? Colors.orange : 
+                      Colors.blue;
+                      
         return Card(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          elevation: 1,
+          margin: const EdgeInsets.symmetric(vertical: 4),
           child: ListTile(
-            leading: CircleAvatar(
-              backgroundColor: color.withOpacity(0.15),
-              child: Icon(icon, color: color),
-            ),
-            title: Text("${c.direction} • ${c.outcome}"),
-            subtitle: Text(_formatDateTime(c.timestamp)),
+            leading: Icon(icon, color: color),
+            // 🔥 MODIFIED: Use the single, final outcome for display
+            title: Text("${call.direction} – ${call.outcome.toUpperCase()}"), 
+            subtitle: Text(_formatDate(call.timestamp)),
           ),
         );
       }).toList(),
     );
   }
 
+  // -----------------------------------------
+  // UI: NOTES
+  // -----------------------------------------
   Widget _notes() {
     if (_lead.notes.isEmpty) {
       return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 10),
-        child: Text("No notes added yet", style: TextStyle(color: Colors.grey)),
+        padding: EdgeInsets.only(top: 8.0),
+        child: Text("No notes added yet."),
       );
     }
 
-    final notes = _lead.notes.reversed.toList();
-
     return Column(
-      children: notes.map((n) {
+      children: _lead.notes.reversed.map((note) {
         return Card(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          elevation: 1,
+          margin: const EdgeInsets.symmetric(vertical: 4),
           child: ListTile(
             leading: const Icon(Icons.note),
-            title: Text(n.text),
-            subtitle: Text(_formatDateTime(n.timestamp)),
+            title: Text(note.text),
+            subtitle: Text(_formatDate(note.timestamp)),
           ),
         );
       }).toList(),
     );
   }
 
+  // -----------------------------------------
+  // MAIN UI
+  // -----------------------------------------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Lead Details"),
+        title: Text(_lead.name.isEmpty ? _lead.phoneNumber : _lead.name),
         backgroundColor: Colors.blueAccent,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.edit),
+            onPressed: _editLead,
+            tooltip: 'Edit Lead',
+          ),
+        ],
       ),
       body: RefreshIndicator(
         onRefresh: _reloadLead,

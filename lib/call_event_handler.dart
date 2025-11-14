@@ -13,19 +13,12 @@ class CallEventHandler {
   static const EventChannel _eventChannel =
       EventChannel("com.example.call_leads_app/callEvents");
 
-  // 🔥 REMOVED: MethodChannel is no longer needed to check for initial calls.
-  // static const MethodChannel _methodChannel =
-  //     MethodChannel("com.example.call_leads_app/initialCall");
-
   final LeadService _leadService = LeadService();
 
   StreamSubscription? _subscription;
 
   /// Prevents multiple screens from opening
   bool _screenOpen = false;
-
-  // 🔥 REMOVED: Pending events are now buffered in the native CallService.kt
-  // final List<Map<String, dynamic>> _pendingEvents = [];
 
   CallEventHandler({required this.navigatorKey});
 
@@ -34,12 +27,6 @@ class CallEventHandler {
   // ---------------------------------------------------------------------------
   void startListening() {
     print("📞 [CALL HANDLER] START LISTENING");
-
-    // 🔥 REMOVED: _checkInitialCall() is obsolete
-    // _checkInitialCall();
-    
-    // 🔥 The native side now flushes the pending event upon connection,
-    // so we only need to listen for stream events.
 
     _subscription = _eventChannel.receiveBroadcastStream().listen(
       (event) {
@@ -64,51 +51,17 @@ class CallEventHandler {
     );
   }
 
-  // 🔥 REMOVED: The native side now handles initial call logic
-  // Future<void> _checkInitialCall() async {
-  //   try {
-  //     print("⏳ Checking for initial call...");
-  //     final result =
-  //         await _methodChannel.invokeMethod<Map<Object?, Object?>>('get');
-
-  //     if (result != null) {
-  //       final phone = result['phoneNumber'] as String?;
-  //       if (phone != null) {
-  //         print("📞 INITIAL CALL → $phone");
-  //         await _handleCallStarted(phone);
-  //       }
-  //     }
-
-  //     print("⏳ Processing pending events: ${_pendingEvents.length}");
-  //     // Now that we're connected and checked initial state, process the buffer
-  //     for (var event in _pendingEvents) {
-  //       _processCallEvent(
-  //         event['phoneNumber'] as String,
-  //         event['direction'] as String,
-  //         event['outcome'] as String,
-  //       );
-  //     }
-  //     _pendingEvents.clear();
-  //   } on PlatformException catch (e) {
-  //     print("❌ Failed to get initial call: ${e.message}");
-  //   }
-  // }
-
   // ---------------------------------------------------------------------------
   // PROCESS EVENT
   // ---------------------------------------------------------------------------
   Future<void> _processCallEvent(
       String phone, String direction, String outcome) async {
-    // 🔥 REMOVED: Pending event buffer no longer needed.
-    // // If phone is empty, it's a transient state we can ignore
-    // if (phone.isEmpty) return;
-
-    // // If screen is not open yet, buffer the event
-    // if (!_initDone) {
-    //   _pendingEvents.add(
-    //       {'phoneNumber': phone, 'direction': direction, 'outcome': outcome});
-    //   return;
-    // }
+    
+    // ✅ FIX 1: Ignore events with empty phone numbers
+    if (phone.isEmpty) {
+        print("⚠️ Ignoring call event with empty phone number: $outcome");
+        return;
+    }
 
     // Logic to handle call started (ringing/outbound)
     if (outcome == "ringing" || outcome == "started") {
@@ -125,21 +78,34 @@ class CallEventHandler {
   // HANDLE CALL STARTED (Ringing / Outbound Started)
   // ---------------------------------------------------------------------------
   Future<void> _handleCallStarted(String phone, String direction) async {
-    // 1. Find or create the lead
-    Lead? lead = _leadService.findByPhone(phone);
-    if (lead == null) {
-      lead = await _leadService.createLead(phone);
+    // 1. Check if Lead exists in Firestore
+    Lead? existingLead = _leadService.findByPhone(phone);
+
+    Lead leadToPass;
+    
+    if (existingLead != null) {
+      // Lead exists, pass the existing lead
+      leadToPass = existingLead;
+      print("📞 Existing lead found. Opening UI: ${leadToPass.phoneNumber}");
+    } else {
+      // Lead is NEW, create a transient (in-memory) Lead object.
+      // 🔥 FIX 2: Added required named parameters 'lastInteraction' and 'lastUpdated'.
+      leadToPass = Lead(
+        id: '', // Empty ID means this is a transient lead
+        phoneNumber: phone,
+        name: '',
+        status: 'new',
+        lastCallOutcome: 'none', // Use default from model
+        lastInteraction: DateTime.now(), // REQUIRED
+        lastUpdated: DateTime.now(), // REQUIRED
+        callHistory: [],
+        notes: [],
+      );
+      print("📞 New call. Opening UI with transient lead: ${leadToPass.phoneNumber}");
     }
 
-    // 2. Add the initial event to the lead's history
-    lead = await _leadService.addCallEvent(
-      phone: phone,
-      direction: direction,
-      outcome: direction == "inbound" ? "ringing" : "started",
-    );
-
-    // 3. Open the UI
-    _openLeadUI(lead);
+    // 2. Open the UI, passing the call direction
+    _openLeadUI(leadToPass, direction);
   }
 
   // ---------------------------------------------------------------------------
@@ -147,30 +113,25 @@ class CallEventHandler {
   // ---------------------------------------------------------------------------
   Future<void> _handleCallUpdate(
       String phone, String direction, String outcome) async {
-    // 1. Find the lead (must exist from the 'started' event)
+    // 1. Find the lead (must exist from a previous save action)
     Lead? lead = _leadService.findByPhone(phone);
     if (lead == null) {
-      print("⚠️ Cannot find lead for $phone to record $outcome event.");
+      print("⚠️ Cannot find lead for $phone to record $outcome event. (Lead not saved by user yet).");
       return;
     }
 
     // 2. Add the event to the lead's history
-    lead = await _leadService.addCallEvent(
+    await _leadService.addCallEvent(
       phone: phone,
       direction: direction,
       outcome: outcome,
     );
-    
-    // 3. (Optional) Check for a final event (ended/missed) to ensure UI is closed
-    if (outcome == 'ended' || outcome == 'missed') {
-       // Future.delayed(Duration(seconds: 1), () => _screenOpen = false);
-    }
   }
 
   // ---------------------------------------------------------------------------
   // OPEN THE SCREEN SAFELY
   // ---------------------------------------------------------------------------
-  void _openLeadUI(Lead lead) {
+  void _openLeadUI(Lead lead, String? callDirection) {
     if (_screenOpen) {
       print("⚠️ SCREEN ALREADY OPEN — skipping");
       return;
@@ -180,7 +141,7 @@ class CallEventHandler {
     if (ctx == null) {
       print("❌ NO CONTEXT — delaying open");
       Future.delayed(const Duration(milliseconds: 300), () {
-        _openLeadUI(lead);
+        _openLeadUI(lead, callDirection);
       });
       return;
     }
@@ -194,6 +155,7 @@ class CallEventHandler {
         builder: (_) => LeadFormScreen(
           lead: lead,
           autoOpenedFromCall: true,
+          callDirection: callDirection,
         ),
       ),
     ).then((_) {

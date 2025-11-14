@@ -4,7 +4,8 @@ import 'dart:math';
 /// Call history entry uses DateTime inside the app.
 class CallHistoryEntry {
   final String direction; // inbound / outbound
-  final String outcome; // ringing / answered / missed / ended / started
+  // 🔥 MODIFIED: outcome now uses final statuses for history: answered / missed / rejected / ended
+  final String outcome; 
   final DateTime timestamp;
   final String note;
 
@@ -44,45 +45,14 @@ class CallHistoryEntry {
       };
 }
 
-/// Note model with DateTime
-class LeadNote {
-  final String text;
-  final DateTime timestamp;
-
-  LeadNote({
-    required this.text,
-    required this.timestamp,
-  });
-
-  factory LeadNote.fromMap(Map<String, dynamic> map) {
-    final raw = map['timestamp'];
-    DateTime ts;
-    if (raw is int) {
-      ts = DateTime.fromMillisecondsSinceEpoch(raw);
-    } else if (raw is String) {
-      ts = DateTime.tryParse(raw) ?? DateTime.now();
-    } else {
-      ts = DateTime.now();
-    }
-
-    return LeadNote(
-      text: (map['text'] ?? '').toString(),
-      timestamp: ts,
-    );
-  }
-
-  Map<String, dynamic> toMap() => {
-        'text': text,
-        'timestamp': timestamp.millisecondsSinceEpoch,
-      };
-}
-
-/// Main Lead model
+/// A lead that represents a phone contact.
 class Lead {
   final String id;
   final String name;
   final String phoneNumber;
-  final String status; // e.g. new, in progress, follow up
+  final String status;
+  // 🔥 NEW: Field to help filter in the list page (e.g., 'answered', 'missed')
+  final String lastCallOutcome;
   final DateTime lastInteraction;
   final DateTime lastUpdated;
   final List<LeadNote> notes;
@@ -93,21 +63,38 @@ class Lead {
     required this.name,
     required this.phoneNumber,
     required this.status,
+    // 🔥 NEW
+    this.lastCallOutcome = 'none',
     required this.lastInteraction,
     required this.lastUpdated,
-    required this.notes,
-    required this.callHistory,
+    this.notes = const [],
+    this.callHistory = const [],
   });
 
-  static String generateId() =>
-      DateTime.now().millisecondsSinceEpoch.toString() +
-      Random().nextInt(9999).toString();
+  static String generateId() => DateTime.now().millisecondsSinceEpoch.toString() +
+      Random().nextInt(1000).toString();
+
+  factory Lead.newLead(String phoneNumber) {
+    return Lead(
+      id: generateId(),
+      name: '',
+      phoneNumber: phoneNumber,
+      status: 'new',
+      lastCallOutcome: 'none', // 🔥 NEW
+      lastInteraction: DateTime.now(),
+      lastUpdated: DateTime.now(),
+      notes: [],
+      callHistory: [],
+    );
+  }
 
   Lead copyWith({
     String? id,
     String? name,
     String? phoneNumber,
     String? status,
+    // 🔥 NEW
+    String? lastCallOutcome,
     DateTime? lastInteraction,
     DateTime? lastUpdated,
     List<LeadNote>? notes,
@@ -118,24 +105,12 @@ class Lead {
       name: name ?? this.name,
       phoneNumber: phoneNumber ?? this.phoneNumber,
       status: status ?? this.status,
+      // 🔥 NEW
+      lastCallOutcome: lastCallOutcome ?? this.lastCallOutcome,
       lastInteraction: lastInteraction ?? this.lastInteraction,
       lastUpdated: lastUpdated ?? this.lastUpdated,
       notes: notes ?? this.notes,
       callHistory: callHistory ?? this.callHistory,
-    );
-  }
-
-  factory Lead.newLead(String phone) {
-    final now = DateTime.now();
-    return Lead(
-      id: generateId(),
-      name: '',
-      phoneNumber: phone,
-      status: 'new',
-      lastInteraction: now,
-      lastUpdated: now,
-      notes: [],
-      callHistory: [],
     );
   }
 
@@ -168,6 +143,8 @@ class Lead {
       name: (map['name'] ?? '').toString(),
       phoneNumber: (map['phoneNumber'] ?? '').toString(),
       status: (map['status'] ?? 'new').toString(),
+      // 🔥 NEW: Set default to 'none' if missing
+      lastCallOutcome: (map['lastCallOutcome'] ?? 'none').toString(),
       lastInteraction: lastInteraction,
       lastUpdated: lastUpdated,
       notes: notesList.map((e) => LeadNote.fromMap(Map<String, dynamic>.from(e))).toList(),
@@ -180,9 +157,41 @@ class Lead {
         'name': name,
         'phoneNumber': phoneNumber,
         'status': status,
+        // 🔥 NEW
+        'lastCallOutcome': lastCallOutcome, 
         'lastInteraction': lastInteraction.millisecondsSinceEpoch,
         'lastUpdated': lastUpdated.millisecondsSinceEpoch,
-        'notes': notes.map((n) => n.toMap()).toList(),
-        'callHistory': callHistory.map((c) => c.toMap()).toList(),
+        'notes': notes.map((e) => e.toMap()).toList(),
+        'callHistory': callHistory.map((e) => e.toMap()).toList(),
+      };
+}
+
+/// A note entry attached to a lead.
+class LeadNote {
+  final String text;
+  final DateTime timestamp;
+
+  LeadNote({required this.text, required this.timestamp});
+
+  factory LeadNote.fromMap(Map<String, dynamic> map) {
+    final raw = map['timestamp'];
+    DateTime ts;
+    if (raw is int) {
+      ts = DateTime.fromMillisecondsSinceEpoch(raw);
+    } else if (raw is String) {
+      ts = DateTime.tryParse(raw) ?? DateTime.now();
+    } else {
+      ts = DateTime.now();
+    }
+
+    return LeadNote(
+      text: (map['text'] ?? '').toString(),
+      timestamp: ts,
+    );
+  }
+
+  Map<String, dynamic> toMap() => {
+        'text': text,
+        'timestamp': timestamp.millisecondsSinceEpoch,
       };
 }

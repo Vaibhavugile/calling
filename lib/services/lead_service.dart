@@ -1,5 +1,3 @@
-// lib/services/lead_service.dart
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 // NOTE: firebase_auth is no longer needed/imported for this flat structure.
 import '../models/lead.dart';
@@ -75,6 +73,65 @@ class LeadService {
     _cached.add(lead);
     await saveLead(lead); // Persist to Firestore immediately
     return lead;
+  }
+  
+  // 🔥 RE-IMPLEMENTED: findOrCreateLead for CallEventHandler compatibility
+  Future<Lead> findOrCreateLead({
+    required String phone,
+    required String finalOutcome,
+  }) async {
+    final normalized = _normalize(phone);
+    final existingIndex = _cached.indexWhere(
+        (l) => _normalize(l.phoneNumber) == normalized);
+    
+    Lead lead;
+    if (existingIndex == -1) {
+      // Create New Lead
+      lead = Lead.newLead(normalized);
+      _cached.add(lead);
+    } else {
+      // Found Existing Lead
+      lead = _cached[existingIndex];
+    }
+
+    // Update the lead's interaction time and outcome for list filtering
+    final updated = lead.copyWith(
+      lastInteraction: DateTime.now(),
+      lastUpdated: DateTime.now(),
+      lastCallOutcome: finalOutcome, 
+    );
+
+    await saveLead(updated);
+    // Note: saveLead updates the cache
+
+    return updated;
+  }
+
+  // 🔥 RE-IMPLEMENTED: addCallHistoryEntry for UI/CallHandler compatibility
+  Future<Lead> addCallHistoryEntry({
+    required String leadId,
+    required String direction,
+    required String outcome, // answered, missed, ended, rejected, etc.
+  }) async {
+    final index = _cached.indexWhere((l) => l.id == leadId);
+    if (index == -1) throw Exception("Lead not found");
+
+    final lead = _cached[index];
+    final entry = CallHistoryEntry(
+      direction: direction,
+      outcome: outcome,
+      timestamp: DateTime.now(),
+    );
+
+    // Update lead with the new call history entry and timestamps
+    final updated = lead.copyWith(
+      lastInteraction: DateTime.now(), // Update interaction time
+      lastUpdated: DateTime.now(), // Update modification time
+      callHistory: [...lead.callHistory, entry],
+    );
+
+    await saveLead(updated); // Persist updated lead and update cache
+    return updated;
   }
 
   Future<Lead> addCallEvent({

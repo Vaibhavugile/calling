@@ -1,3 +1,4 @@
+// lib/screens/lead_list_screen.dart
 import 'package:flutter/material.dart';
 import '../models/lead.dart';
 import '../services/lead_service.dart';
@@ -19,12 +20,30 @@ class _LeadListScreenState extends State<LeadListScreen> {
   bool _loading = true;
 
   final TextEditingController _searchCtrl = TextEditingController();
+  
+  // 🔥 NEW: State for the call filter
+  String _selectedFilter = 'All'; 
+  final List<String> _filters = [
+    'All',
+    'Incoming',
+    'Outgoing',
+    'Answered',
+    'Missed',
+    'Rejected'
+  ];
 
   @override
   void initState() {
     super.initState();
     _loadLeads();
     _searchCtrl.addListener(_applySearch);
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.removeListener(_applySearch);
+    _searchCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _loadLeads() async {
@@ -36,134 +55,149 @@ class _LeadListScreenState extends State<LeadListScreen> {
     // Sort -> latest interaction first
     _allLeads.sort((a, b) => b.lastInteraction.compareTo(a.lastInteraction));
 
-    _filteredLeads = List.from(_allLeads);
-
+    _applySearch(); // Apply search and filter after loading
+    
     setState(() => _loading = false);
   }
 
   void _applySearch() {
     final query = _searchCtrl.text.toLowerCase();
+    
+    // First, apply text search
+    List<Lead> searchFiltered = _allLeads.where((l) {
+      return l.name.toLowerCase().contains(query) ||
+             l.phoneNumber.contains(query);
+    }).toList();
 
-    if (query.isEmpty) {
-      setState(() => _filteredLeads = List.from(_allLeads));
-      return;
-    }
+    // 🔥 Second, apply call filter
+    _filteredLeads = searchFiltered.where((l) {
+      if (_selectedFilter == 'All') return true;
 
+      // Filter by Direction (based on the last call's direction)
+      if (_selectedFilter == 'Incoming' && l.callHistory.isNotEmpty && l.callHistory.last.direction == 'inbound') return true;
+      if (_selectedFilter == 'Outgoing' && l.callHistory.isNotEmpty && l.callHistory.last.direction == 'outbound') return true;
+
+      // Filter by Outcome (based on the new lastCallOutcome field)
+      if (_selectedFilter == 'Answered' && l.lastCallOutcome == 'answered') return true;
+      if (_selectedFilter == 'Missed' && l.lastCallOutcome == 'missed') return true;
+      if (_selectedFilter == 'Rejected' && l.lastCallOutcome == 'rejected') return true;
+
+      // If filtering by direction, also include leads with the corresponding outcome
+      if (_selectedFilter == 'Incoming' && (l.lastCallOutcome == 'answered' || l.lastCallOutcome == 'missed' || l.lastCallOutcome == 'rejected')) return true;
+      if (_selectedFilter == 'Outgoing' && (l.lastCallOutcome == 'answered' || l.lastCallOutcome == 'ended')) return true;
+
+
+      return false; // Exclude if not matching the current filter
+    }).toList();
+
+
+    setState(() {});
+  }
+  
+  // 🔥 NEW: Method to handle filter change
+  void _changeFilter(String filter) {
     setState(() {
-      _filteredLeads = _allLeads.where((lead) {
-        return lead.name.toLowerCase().contains(query) ||
-            lead.phoneNumber.toLowerCase().contains(query);
-      }).toList();
+      _selectedFilter = filter;
+      _applySearch(); // Re-filter the list
     });
   }
 
-  // -------------------------------------------------------
-  // LAST CALL SUBTITLE
-  // -------------------------------------------------------
-  String _lastCall(Lead lead) {
-    if (lead.callHistory.isEmpty) return "No calls yet";
-    final last = lead.callHistory.last;
-    return "${last.direction} • ${last.outcome}";
+
+  Widget _statusChip(String status) {
+    Color color;
+    switch (status) {
+      case "new":
+        color = Colors.blue;
+        break;
+      case "in progress":
+        color = Colors.orange;
+        break;
+      case "follow up":
+        color = Colors.purple;
+        break;
+      case "interested":
+        color = Colors.green;
+        break;
+      default:
+        color = Colors.grey;
+    }
+    return Chip(
+      label: Text(
+        status.toUpperCase(),
+        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+      ),
+      backgroundColor: color.withOpacity(0.1),
+      labelStyle: TextStyle(color: color),
+      visualDensity: VisualDensity.compact,
+    );
   }
 
-  // -------------------------------------------------------
-  // LEAD CARD
-  // -------------------------------------------------------
+  // -----------------------------------------
+  // UI: LEAD CARD
+  // -----------------------------------------
   Widget _leadCard(Lead lead) {
     return Card(
-      elevation: 3,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      elevation: 1,
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: ListTile(
-        contentPadding: const EdgeInsets.all(16),
-
-        leading: CircleAvatar(
-          radius: 26,
-          backgroundColor: Colors.blue.shade100,
-          child: Text(
-            lead.name.isEmpty ? "#" : lead.name[0].toUpperCase(),
-            style: TextStyle(
-              fontSize: 22,
-              color: Colors.blue.shade600,
-            ),
-          ),
-        ),
-
-        title: Text(
-          lead.name.isEmpty ? "No Name" : lead.name,
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-        ),
-
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 4),
-            Text(
-              lead.phoneNumber,
-              style: const TextStyle(fontSize: 14, color: Colors.black87),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              _lastCall(lead),
-              style: const TextStyle(fontSize: 13, color: Colors.grey),
-            ),
-          ],
-        ),
-
-        trailing: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: Colors.blue.shade50,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Text(
-            lead.status,
-            style: TextStyle(
-              color: Colors.blue.shade700,
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-
-        onTap: () async {
-          await Navigator.push(
+        onTap: () {
+          Navigator.push(
             context,
             MaterialPageRoute(
               builder: (_) => LeadDetailsScreen(lead: lead),
             ),
-          );
-          _loadLeads(); // refresh after editing
+          ).then((_) => _loadLeads());
         },
+        title: Text(lead.name.isEmpty ? "No Name" : lead.name),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(lead.phoneNumber),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                _statusChip(lead.status),
+                const SizedBox(width: 8),
+                // 🔥 NEW: Display last call outcome
+                if (lead.lastCallOutcome != 'none')
+                  Chip(
+                    label: Text(
+                      lead.lastCallOutcome.toUpperCase(),
+                      style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                    backgroundColor: lead.lastCallOutcome == 'missed' ? Colors.red.withOpacity(0.1) : Colors.green.withOpacity(0.1),
+                    labelStyle: lead.lastCallOutcome == 'missed' ? const TextStyle(color: Colors.red) : const TextStyle(color: Colors.green),
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ],
+            ),
+          ],
+        ),
+        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
       ),
     );
   }
 
-  @override
-  void dispose() {
-    _searchCtrl.dispose();
-    super.dispose();
-  }
-
-  // -------------------------------------------------------
-  // UI
-  // -------------------------------------------------------
+  // -----------------------------------------
+  // MAIN UI
+  // -----------------------------------------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("All Leads"),
+        title: const Text("Lead List"),
         backgroundColor: Colors.blueAccent,
+        foregroundColor: Colors.white,
       ),
-
       floatingActionButton: FloatingActionButton(
-        backgroundColor: Colors.blueAccent,
         child: const Icon(Icons.add),
         onPressed: () {
           Navigator.push(
             context,
             MaterialPageRoute(
+              // Opens form for a new, empty lead.
               builder: (_) => LeadFormScreen(
-                lead: Lead.newLead(""),
+                lead: Lead.newLead(""), 
                 autoOpenedFromCall: false,
               ),
             ),
@@ -191,6 +225,36 @@ class _LeadListScreenState extends State<LeadListScreen> {
                     ),
                   ),
                 ),
+
+                // -------------------------
+                // FILTER CHIPS (NEW)
+                // -------------------------
+                SizedBox(
+                  height: 40,
+                  child: ListView.builder(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    itemCount: _filters.length,
+                    itemBuilder: (_, i) {
+                      final filter = _filters[i];
+                      final isSelected = _selectedFilter == filter;
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ActionChip(
+                          label: Text(filter),
+                          backgroundColor: isSelected ? Colors.blueAccent : Colors.grey.shade200,
+                          labelStyle: TextStyle(
+                            color: isSelected ? Colors.white : Colors.black87,
+                            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                          ),
+                          onPressed: () => _changeFilter(filter),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                
+                const SizedBox(height: 8),
 
                 // -------------------------
                 // LIST
