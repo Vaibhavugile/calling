@@ -1,12 +1,16 @@
+// lib/screens/lead_details_screen.dart
+
 import 'package:flutter/material.dart';
 import '../models/lead.dart';
 import '../services/lead_service.dart';
-import 'lead_form_screen.dart';
 
 class LeadDetailsScreen extends StatefulWidget {
   final Lead lead;
 
-  const LeadDetailsScreen({super.key, required this.lead});
+  const LeadDetailsScreen({
+    super.key,
+    required this.lead,
+  });
 
   @override
   State<LeadDetailsScreen> createState() => _LeadDetailsScreenState();
@@ -16,55 +20,42 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
   final LeadService _service = LeadService();
 
   late Lead _lead;
-  final TextEditingController _noteCtrl = TextEditingController();
+
+  // Controller for the read-only phone number field
+  late TextEditingController _phoneController; 
+  
+  // ✅ FIX: Note controller added
+  late TextEditingController _noteController;
+
+  final List<String> _statusOptions = [
+    "new",
+    "in progress",
+    "follow up",
+    "interested",
+    "not interested",
+    "closed",
+  ];
 
   @override
   void initState() {
     super.initState();
     _lead = widget.lead;
+    // Initialize controllers
+    _phoneController = TextEditingController(text: _lead.phoneNumber);
+    _noteController = TextEditingController(); // ✅ FIX: Initialized
   }
 
   @override
   void dispose() {
-    _noteCtrl.dispose();
+    _phoneController.dispose();
+    _noteController.dispose(); // ✅ FIX: Disposed
     super.dispose();
   }
+  
+  // -------------------------------------------------------------------------
+  // UTILITY METHODS
+  // -------------------------------------------------------------------------
 
-  // Reloads lead from service cache/storage to get updated details
-  Future<void> _reloadLead() async {
-    final refreshed = _service.findByPhone(_lead.phoneNumber);
-    if (refreshed != null) {
-      setState(() => _lead = refreshed);
-    }
-  }
-
-  void _editLead() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        // Navigation remains to the unified LeadFormScreen
-        builder: (_) => LeadFormScreen(lead: _lead),
-      ),
-    ).then((_) {
-      // Reload the lead data after returning from the form
-      _reloadLead();
-    });
-  }
-
-  Future<void> _addNote() async {
-    final text = _noteCtrl.text.trim();
-    if (text.isEmpty) return;
-
-    final updated = await _service.addNote(_lead.id, text);
-    setState(() {
-      _lead = updated;
-      _noteCtrl.clear();
-    });
-  }
-
-  // -----------------------------------------
-  // UTIL: DURATION FORMATTER (🔥 NEW)
-  // -----------------------------------------
   /// Converts seconds to a human-readable string (e.g., '1m 35s').
   String _formatDuration(int seconds) {
     if (seconds < 60) return '${seconds}s';
@@ -73,18 +64,75 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
     return '${minutes}m ${secs}s';
   }
 
-  // -----------------------------------------
-  // UTIL: DATE FORMATTER
-  // -----------------------------------------
   String _formatDate(DateTime dt) {
     final d = dt.toLocal();
-    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}  "
+    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}  "
         "${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}";
   }
 
-  // -----------------------------------------
-  // UI: HEADER CARD
-  // -----------------------------------------
+  // -------------------------------------------------------------------------
+  // PERSISTENCE & ACTIONS
+  // -------------------------------------------------------------------------
+  
+  Future<void> _saveStatus(String newStatus) async {
+    final updated = _lead.copyWith(
+      status: newStatus,
+      lastInteraction: DateTime.now(), 
+      lastUpdated: DateTime.now(), 
+    );
+    
+    // Assumes lead.id is not empty for a Details screen
+    await _service.saveLead(updated);
+    
+    setState(() {
+      _lead = updated;
+    });
+  }
+
+
+  // ✅ FIX: Correct logic to save note and refresh lead state.
+  Future<void> _addNote() async {
+    if (_noteController.text.isEmpty) return;
+
+    final String note = _noteController.text.trim();
+    _noteController.clear(); // Clear the text field immediately
+
+    try {
+      // 1. Save the note. Note that addNote returns Future<void>.
+      await _service.addNote(lead: _lead, note: note);
+
+      // 2. Fetch the updated lead object from the service (which includes the new note)
+      final updatedLead = await _service.getLead(leadId: _lead.id);
+
+      // 3. Update local state
+      setState(() {
+        if (updatedLead != null) {
+          _lead = updatedLead; // Now assigning a Lead object, fixing the error
+        }
+      });
+    } catch (e) {
+      print('❌ Error adding note: $e');
+      // Handle the exception gracefully, e.g., show a snackbar
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // UI COMPONENTS
+  // -------------------------------------------------------------------------
+  Widget _sectionTitle(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 20, bottom: 10),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 20,
+          fontWeight: FontWeight.w700,
+          color: Colors.blueGrey.shade900,
+        ),
+      ),
+    );
+  }
+
   Widget _headerCard() {
     return Card(
       elevation: 4,
@@ -94,77 +142,47 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              _lead.name.isEmpty ? "No Name" : _lead.name,
-              style: const TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 8),
             Row(
               children: [
-                const Icon(Icons.phone, size: 18, color: Colors.blueGrey),
-                const SizedBox(width: 8),
-                Text(
-                  _lead.phoneNumber,
-                  style: TextStyle(
-                    fontSize: 18,
-                    color: Colors.blueGrey.shade700,
+                CircleAvatar(
+                  radius: 28,
+                  backgroundColor: Colors.blue.shade100,
+                  child: Icon(Icons.phone_android,
+                      size: 28, color: Colors.blue.shade700),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Text(
+                    _lead.phoneNumber,
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.indigo.shade100,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                _lead.status.toUpperCase(),
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.indigo.shade800,
-                ),
-              ),
-            ),
-            
-            // Display last call outcome
             if (_lead.lastCallOutcome != 'none') ...[
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
+              // Display the last call outcome for context
               Text(
-                'Last Call: ${_lead.lastCallOutcome.toUpperCase()}',
+                'Last Call Status: ${_lead.lastCallOutcome.toUpperCase()}',
                 style: TextStyle(
-                  fontSize: 14,
+                  fontSize: 16,
+                  color: _lead.lastCallOutcome == 'missed' ? Colors.red.shade700 : Colors.green.shade700,
                   fontWeight: FontWeight.w600,
-                  color: _lead.lastCallOutcome == 'missed' ? Colors.red : Colors.green.shade700,
                 ),
               ),
-            ],
-            
-            const SizedBox(height: 12),
-            Text(
-              "Last updated: ${_formatDate(_lead.lastUpdated)}",
-              style: const TextStyle(fontSize: 12, color: Colors.grey),
-            ),
+            ]
           ],
         ),
       ),
     );
   }
 
-  // -----------------------------------------
-  // UI: CALL HISTORY (🔥 UPDATED to show duration)
-  // -----------------------------------------
-  Widget _callHistory() {
+  Widget _callHistorySection() {
     if (_lead.callHistory.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.only(top: 8.0),
-        child: Text("No call history recorded (only final outcome logged)."), 
-      );
+      return const Text("No call history yet.");
     }
 
     return Column(
@@ -175,18 +193,17 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
                       call.outcome == "rejected" ? Colors.orange : 
                       Colors.blue;
         
-        // Calculate and format duration
         final durationText = call.durationInSeconds != null
             ? ' (${_formatDuration(call.durationInSeconds!)})'
             : '';
-                      
+
         return Card(
-          elevation: 1,
-          margin: const EdgeInsets.symmetric(vertical: 4),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: ListTile(
             leading: Icon(icon, color: color),
             // Title includes outcome and duration
-            title: Text("${call.direction} – ${call.outcome.toUpperCase()}$durationText"), 
+            title: Text("${call.direction} – ${call.outcome.toUpperCase()}$durationText"),
             subtitle: Text(_formatDate(call.timestamp)),
           ),
         );
@@ -194,22 +211,16 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
     );
   }
 
-  // -----------------------------------------
-  // UI: NOTES
-  // -----------------------------------------
-  Widget _notes() {
+  Widget _notesSection() {
     if (_lead.notes.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.only(top: 8.0),
-        child: Text("No notes added yet."),
-      );
+      return const Text("No notes yet");
     }
 
     return Column(
       children: _lead.notes.reversed.map((note) {
         return Card(
-          elevation: 1,
-          margin: const EdgeInsets.symmetric(vertical: 4),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: ListTile(
             leading: const Icon(Icons.note),
             title: Text(note.text),
@@ -220,6 +231,7 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
     );
   }
 
+
   // -----------------------------------------
   // MAIN UI
   // -----------------------------------------
@@ -227,59 +239,95 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_lead.name.isEmpty ? _lead.phoneNumber : _lead.name),
+        title: const Text("Lead Details"),
         backgroundColor: Colors.blueAccent,
         foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.edit),
-            onPressed: _editLead,
-            tooltip: 'Edit Lead',
-          ),
-        ],
       ),
-      body: RefreshIndicator(
-        onRefresh: _reloadLead,
-        child: SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _headerCard(),
-              const SizedBox(height: 20),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _headerCard(),
 
-              const Text("Call history",
-                  style:
-                      TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-              _callHistory(),
+            // PHONE NUMBER (Read Only)
+            _sectionTitle("Phone Number"),
+            TextField(
+              controller: _phoneController,
+              readOnly: true, 
+              decoration: InputDecoration(
+                filled: true,
+                fillColor: Colors.grey.shade200,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
 
-              const SizedBox(height: 20),
 
-              const Text("Notes",
-                  style:
-                      TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-              _notes(),
+            // NAME (Read Only for Details Screen)
+            _sectionTitle("Name"),
+            TextField(
+              controller: TextEditingController(text: _lead.name), // Display the current name
+              readOnly: true,
+              decoration: InputDecoration(
+                filled: true,
+                fillColor: Colors.grey.shade200,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
 
-              const SizedBox(height: 16),
-              TextField(
-                controller: _noteCtrl,
-                minLines: 1,
-                maxLines: 3,
-                decoration: InputDecoration(
-                  hintText: "Add a note...",
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.send),
-                    onPressed: _addNote,
-                  ),
+            // STATUS (Editable)
+            _sectionTitle("Status"),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.blueGrey.shade200),
+              ),
+              child: DropdownButton<String>(
+                value: _lead.status,
+                isExpanded: true,
+                underline: const SizedBox(),
+                items: _statusOptions.map((s) {
+                  return DropdownMenuItem(value: s, child: Text(s));
+                }).toList(),
+                onChanged: (val) async {
+                  if (val == null) return;
+                  await _saveStatus(val);
+                },
+              ),
+            ),
+
+            // CALL HISTORY
+            _sectionTitle("Call History"),
+            _callHistorySection(),
+
+            // NOTES
+            _sectionTitle("Notes"),
+            _notesSection(),
+
+            const SizedBox(height: 12),
+
+            // NOTE INPUT FIELD
+            TextField(
+              controller: _noteController,
+              minLines: 1,
+              maxLines: 3,
+              decoration: InputDecoration(
+                hintText: "Write a note...",
+                border:
+                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.send),
+                  onPressed: _addNote,
                 ),
               ),
+            ),
 
-              const SizedBox(height: 30),
-            ],
-          ),
+            const SizedBox(height: 40),
+          ],
         ),
       ),
     );

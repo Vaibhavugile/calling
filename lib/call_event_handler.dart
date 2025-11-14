@@ -21,6 +21,9 @@ class CallEventHandler {
   /// Prevents multiple screens from opening
   bool _screenOpen = false;
 
+  // ✅ FIX: State tracker for call deduplication
+  String? _currentlyProcessingCall; 
+
   CallEventHandler({required this.navigatorKey});
 
   // --------------------------------------------------------------------------
@@ -31,10 +34,9 @@ class CallEventHandler {
     
     _subscription = _eventChannel
         .receiveBroadcastStream()
-        // 🔥 FIX: Removed .cast<Map<String, dynamic>>() to prevent type error
         .listen(
       (event) {
-        // 🔥 FIX: Explicitly create a new Map<String, dynamic> from the raw event
+        // Explicitly create a new Map<String, dynamic> from the raw event
         final Map<String, dynamic> typedEvent = Map<String, dynamic>.from(event as Map);
         _processCallEvent(typedEvent);
       },
@@ -53,45 +55,61 @@ class CallEventHandler {
     print("🛑 [CALL HANDLER] STOP LISTENING");
   }
   
-  // ✅ FIX: Add dispose method for cleanup in main.dart
   void dispose() {
     stopListening();
   }
 
   // --------------------------------------------------------------------------
-  // EVENT PROCESSOR
+  // EVENT PROCESSOR (Now includes deduplication logic)
   // --------------------------------------------------------------------------
   void _processCallEvent(Map<String, dynamic> event) {
     print('📞 RAW EVENT → $event');
     final phoneNumber = event['phoneNumber'] as String;
-    final direction = event['direction'] as String;
+    // final direction = event['direction'] as String; // Not used directly here
     final outcome = event['outcome'] as String;
-    final duration = event['duration'] as int?; 
+    // final duration = event['duration'] as int?; // Not used directly here
 
     if (phoneNumber.isEmpty) {
       print("! Ignoring call event with empty phone number: $outcome");
       return;
     }
 
+    // 🎯 DEDUPLICATION LOGIC
     if (outcome == 'ringing' || outcome == 'started') {
+      if (_currentlyProcessingCall == phoneNumber) {
+        print("! DEDUPLICATED: Skipping duplicate initial event for $phoneNumber ($outcome)");
+        return;
+      }
+      // If it's a new ringing/started event, set the tracker
+      _currentlyProcessingCall = phoneNumber; 
+      
+      // Pass the event to the original handler
       _handleCallStarted(
         phoneNumber: phoneNumber,
-        direction: direction,
+        direction: event['direction'] as String,
         outcome: outcome,
       );
-    } else {
+    } 
+    // 🎯 TERMINAL STATE LOGIC
+    else {
+      // Clear the tracker for terminal events (ended, missed, rejected)
+      if (_currentlyProcessingCall == phoneNumber) {
+         _currentlyProcessingCall = null;
+      }
+
+      // Pass the event to the original handler
       _handleCallUpdate(
         phoneNumber: phoneNumber,
-        direction: direction,
+        direction: event['direction'] as String,
         outcome: outcome,
-        duration: duration,
+        duration: event['duration'] as int?,
       );
     }
   }
 
 
   // --------------------------------------------------------------------------
-  // HANDLERS
+  // HANDLERS (Ensures existing lead data is preserved and updated)
   // --------------------------------------------------------------------------
   void _handleCallStarted({
     required String phoneNumber,
@@ -99,13 +117,14 @@ class CallEventHandler {
     required String outcome,
   }) async {
     try {
-      // 1. Ensure lead exists (creates new one if necessary) - Fixes "Lead not found"
+      // 1. Find or Create (ensures a lead exists and is saved once)
       await _leadService.findOrCreateLead(
         phone: phoneNumber,
+        // Using 'none' here as the final outcome is determined by the last event
         finalOutcome: 'none', 
       );
 
-      // 2. Log the initial event
+      // 2. Add Event (Logs the 'ringing'/'started' event and saves/returns the updated Lead)
       final Lead lead = await _leadService.addCallEvent( 
         phone: phoneNumber,
         direction: direction,
@@ -113,7 +132,8 @@ class CallEventHandler {
         durationInSeconds: null, 
       );
 
-      print('📞 New call. Opening UI with transient lead: $phoneNumber');
+      print('📞 New call. Opening UI with lead ID: ${lead.id}');
+      // 3. Open UI: Pass the lead, which contains all pre-filled data and new history.
       _openLeadUI(lead);
     } catch (e) {
       print("❌ Error handling call start: $e");
@@ -127,7 +147,8 @@ class CallEventHandler {
     int? duration,
   }) async {
     try {
-      // 1. Log the update event (answered, ended, missed, rejected)
+      // 1. Log the update event (answered, ended, missed, rejected).
+      // This implicitly updates the existing lead in the database.
       await _leadService.addCallEvent(
         phone: phoneNumber,
         direction: direction,
@@ -135,7 +156,7 @@ class CallEventHandler {
         durationInSeconds: duration, 
       );
 
-      // We rely on the screen refreshing itself on resume/focus.
+      // No screen update needed here; the form screen should refresh on its own if active.
       
     } catch (e) {
       print("❌ Error handling call update: $e");
@@ -146,9 +167,9 @@ class CallEventHandler {
   // UI HANDLERS
   // --------------------------------------------------------------------------
   
-  // ✅ FIX: Empty implementation of a method that used to cause 'LeadFormScreenState' errors
+  // Empty implementation of a method that used to cause 'LeadFormScreenState' errors
   void _updateLeadScreen(Lead updatedLead) {
-    // Rely on the screen refreshing itself on resume/focus.
+    // This is intentionally left simple.
   }
 
   // ---------------------------------------------------------------------------
@@ -177,9 +198,10 @@ class CallEventHandler {
         settings: const RouteSettings(name: '/lead-form'),
         fullscreenDialog: true,
         builder: (_) => LeadFormScreen(
+          // Pass the complete lead object containing all existing data and new history
           lead: lead,
           autoOpenedFromCall: true,
-          // ✅ FIX: Removed the 'callDirection' parameter entirely 
+          // Removed 'callDirection' parameter, as it is obsolete.
         ),
       ),
     ).then((_) {

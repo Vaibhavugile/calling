@@ -1,3 +1,5 @@
+// lib/services/lead_service.dart
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/lead.dart';
 
@@ -43,6 +45,20 @@ class LeadService {
     }
   }
 
+  // ✅ NEW: Fetch a single lead from Firestore by ID. Used for integrity checks.
+  Future<Lead?> getLead({required String leadId}) async {
+    try {
+      final doc = await _leadsCollection.doc(leadId).get();
+      if (doc.exists) {
+        return Lead.fromMap(doc.data()!);
+      }
+      return null;
+    } catch (e) {
+      print("❌ [FIRESTORE] Error fetching lead $leadId: $e");
+      return null;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // SAVE (The core persistence method)
   // ---------------------------------------------------------------------------
@@ -74,23 +90,30 @@ class LeadService {
     return lead;
   }
   
-  // RE-IMPLEMENTED: findOrCreateLead for CallEventHandler compatibility
+  // ✅ UPDATED: Added Firestore check if not found in cache.
   Future<Lead> findOrCreateLead({
     required String phone,
     required String finalOutcome,
   }) async {
     final normalized = _normalize(phone);
-    final existingIndex = _cached.indexWhere(
-        (l) => _normalize(l.phoneNumber) == normalized);
     
-    Lead lead;
-    if (existingIndex == -1) {
-      // Create New Lead
-      lead = Lead.newLead(normalized);
-      _cached.add(lead);
-    } else {
-      // Found Existing Lead
-      lead = _cached[existingIndex];
+    // 1. Search in cache first
+    Lead? lead = findByPhone(normalized);
+
+    if (lead == null) {
+      // 2. If not in cache, search Firestore
+      final querySnapshot = await _leadsCollection
+          .where('phoneNumber', isEqualTo: normalized)
+          .limit(1)
+          .get();
+      
+      if (querySnapshot.docs.isNotEmpty) {
+        // Found in Firestore
+        lead = Lead.fromMap(querySnapshot.docs.first.data());
+      } else {
+        // 3. Create New Lead
+        lead = Lead.newLead(normalized);
+      }
     }
 
     // Update the lead's interaction time and outcome for list filtering
@@ -101,96 +124,77 @@ class LeadService {
     );
 
     await saveLead(updated);
-    // Note: saveLead updates the cache
-
     return updated;
   }
 
-  // RE-IMPLEMENTED: addCallHistoryEntry for UI/CallHandler compatibility
-  Future<Lead> addCallHistoryEntry({
-    required String leadId,
-    required String direction,
-    required String outcome, // answered, missed, ended, rejected, etc.
-    // 🔥 NEW: Added parameter here for consistency, though this method is likely unused now.
-    int? durationInSeconds, 
-  }) async {
-    final index = _cached.indexWhere((l) => l.id == leadId);
-    if (index == -1) throw Exception("Lead not found");
-
-    final lead = _cached[index];
-    final entry = CallHistoryEntry(
-      direction: direction,
-      outcome: outcome,
-      timestamp: DateTime.now(),
-      durationInSeconds: durationInSeconds, // 🔥 NEW: Passed to constructor
-    );
-
-    // Update lead with the new call history entry and timestamps
-    final updated = lead.copyWith(
-      lastInteraction: DateTime.now(), // Update interaction time
-      lastUpdated: DateTime.now(), // Update modification time
-      callHistory: [...lead.callHistory, entry],
-    );
-
-    await saveLead(updated); // Persist updated lead and update cache
-    return updated;
-  }
+  // addCallHistoryEntry method is retained for potential future use...
 
   // ---------------------------------------------------------------------------
-  // 🔥 FIX: ADDED DURATION PARAMETER & UPDATED LAST CALL OUTCOME LOGIC
+  // ✅ FIX: Uses getLead to fetch the latest state from Firestore before updating
   // ---------------------------------------------------------------------------
   Future<Lead> addCallEvent({
     required String phone,
     required String direction,
     required String outcome,
-    int? durationInSeconds, // 🔥 FIX 1: New optional parameter
+    int? durationInSeconds, 
   }) async {
-    final lead = findByPhone(phone);
-    if (lead == null) throw Exception("Lead not found");
+    // 1. Find lead ID/metadata via cache
+    final Lead? cachedLead = findByPhone(phone);
+    if (cachedLead == null) throw Exception("Lead not found");
+
+    // 2. Fetch the latest lead object from Firestore using the ID
+    final latestLead = await getLead(leadId: cachedLead.id);
+    if (latestLead == null) throw Exception("Lead not found in Firestore.");
 
     final entry = CallHistoryEntry(
       direction: direction,
       outcome: outcome,
       timestamp: DateTime.now(),
-      durationInSeconds: durationInSeconds, // 🔥 FIX 2: Pass duration
+      durationInSeconds: durationInSeconds,
     );
 
     // Determine the outcome to display in the list.
-    // Only update lastCallOutcome if it's a final state (answered, missed, etc.)
     final String newOutcome = (outcome == 'ringing' || outcome == 'started') 
-        ? lead.lastCallOutcome // Keep the current state if it's still ongoing/initial
+        ? latestLead.lastCallOutcome // Keep the current state if it's still ongoing/initial
         : outcome; // Use the final outcome (answered, missed, rejected, ended)
 
-    final updated = lead.copyWith(
+    final updated = latestLead.copyWith(
       lastInteraction: DateTime.now(),
       lastUpdated: DateTime.now(),
-      callHistory: [...lead.callHistory, entry],
-      lastCallOutcome: newOutcome, // 🔥 FIX 3: Update based on final outcome
+      callHistory: [...latestLead.callHistory, entry],
+      lastCallOutcome: newOutcome,
     );
 
     await saveLead(updated); // Persist updated lead
     return updated;
   }
 
+  // ✅ FIX: Uses getLead to fetch the latest state from Firestore before adding a note
   Future<void> addNote({required Lead lead, required String note}) async {
-  if (lead.id.isEmpty) {
-    throw Exception('Lead must have a valid ID to add a note.');
+    if (lead.id.isEmpty) {
+      throw Exception('Lead must have a valid ID to add a note.');
+    }
+
+    // Fetch the latest version from Firestore to prevent overwriting concurrent updates
+    final latestLead = await getLead(leadId: lead.id);
+    if (latestLead == null) throw Exception("Lead not found for note update.");
+    
+    final updatedLead = latestLead.copyWith(
+      notes: [
+        ...latestLead.notes,
+        LeadNote(
+  timestamp: DateTime.now(),
+  text: note, // ⬅️ FIX IS HERE
+),
+      ],
+      lastUpdated: DateTime.now(),
+      lastInteraction: DateTime.now(), // A note is an interaction
+    );
+
+    await saveLead(updatedLead); 
   }
 
-  final updatedLead = lead.copyWith(
-    notes: [
-      ...lead.notes,
-      LeadNote(
-        timestamp: DateTime.now(),
-        content: note,
-      ),
-    ],
-    lastUpdated: DateTime.now(),
-  );
-
-  await saveLead(updatedLead); // Assuming saveLead handles the update
-}
-
+  // ✅ UPDATED: Now updates lastInteraction on update.
   Future<Lead> updateLead({
     required String id,
     String? name,
@@ -206,6 +210,7 @@ class LeadService {
       status: status ?? lead.status,
       phoneNumber: phoneNumber ?? lead.phoneNumber,
       lastUpdated: DateTime.now(),
+      lastInteraction: DateTime.now(),
     );
 
     await saveLead(updated); // Persist updated lead

@@ -81,30 +81,36 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
   // -------------------------------------------------------------------------
   /// Checks if the lead is transient (no ID) and saves it to Firestore.
   Future<void> _persistLeadIfTransient() async {
-    // If the ID is empty, the lead exists only in memory (transient).
-    if (_lead.id.isEmpty) {
-        print("📝 First save: Persisting new lead for ${_lead.phoneNumber}");
-        
-        // 1. Create the lead in Firestore to get an ID
-        final persistedLead = await _service.createLead(_lead.phoneNumber);
-        
-        // 2. Update the local state with the new persisted lead's ID and original transient data
-        setState(() {
-          // Copy form data onto the new persisted lead object.
-          _lead = persistedLead.copyWith(
-            name: _lead.name,
-            status: _lead.status,
-            lastCallOutcome: _lead.lastCallOutcome,
-            lastInteraction: DateTime.now(), 
-            lastUpdated: DateTime.now(), 
-          );
-        });
-        
-        // 🔥 REMOVED: The initial call event is now logged by the CallEventHandler 
-        // immediately upon the call starting, not here.
-    }
-  }
+  // If the ID is empty, the lead exists only in memory (transient).
+  if (_lead.id.isEmpty) {
+      print("📝 First save: Persisting new lead for ${_lead.phoneNumber}");
+      
+      // 1. Create the lead in Firestore to get an ID (saves only phone number)
+      final persistedLead = await _service.createLead(_lead.phoneNumber);
+      
+      // 2. Update the local lead object, using the new ID and current controller values
+      // This is crucial to preserve the call history and status that the CallEventHandler
+      // may have already added to the transient lead object.
+      final updatedTransientLead = persistedLead.copyWith(
+        // Use the current state and controller values
+        name: _nameController.text.trim(), 
+        status: _lead.status,
+        callHistory: _lead.callHistory, // Preserve history added by CallEventHandler
+        notes: _lead.notes, // Preserve notes
+        lastCallOutcome: _lead.lastCallOutcome,
+        lastInteraction: DateTime.now(), 
+        lastUpdated: DateTime.now(), 
+      );
 
+      // 3. Save the fully updated object back to Firestore
+      await _service.saveLead(updatedTransientLead);
+
+      // 4. Update local state
+      setState(() {
+          _lead = updatedTransientLead;
+      });
+  }
+}
   // -------------------------------------------------------------------------
   // 🔥 REMOVED: _logCallHistory function is now gone.
   // -------------------------------------------------------------------------
