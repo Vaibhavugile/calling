@@ -7,14 +7,15 @@ import '../services/lead_service.dart';
 class LeadFormScreen extends StatefulWidget {
   final Lead lead;
   final bool autoOpenedFromCall;
-  // 🔥 NEW: Pass the call direction from the handler
-  final String? callDirection;
+  
+  // 🔥 REMOVED: final String? callDirection; // No longer needed
   
   const LeadFormScreen({
     super.key,
     required this.lead,
     this.autoOpenedFromCall = false,
-    this.callDirection,
+    
+    // 🔥 REMOVED: callDirection
   });
 
   @override
@@ -28,12 +29,11 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
 
   late TextEditingController _nameController;
   late TextEditingController _noteController;
-  // 🔥 NEW: Controller for the read-only phone number field
+  // Controller for the read-only phone number field
   late TextEditingController _phoneController; 
 
   bool _hasUnsavedNameChanges = false; 
-  // 🔥 NEW: Flag to ensure we only log the final call history event once
-  bool _callHistoryEntryAdded = false; 
+  // 🔥 REMOVED: _callHistoryEntryAdded flag is no longer needed
 
   final List<String> _statusOptions = [
     "new",
@@ -50,7 +50,7 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
     _lead = widget.lead;
     _nameController = TextEditingController(text: _lead.name);
     _noteController = TextEditingController();
-    // 🔥 NEW: Initialize phone controller with the lead's phone number
+    // Initialize phone controller with the lead's phone number
     _phoneController = TextEditingController(text: _lead.phoneNumber);
 
     _nameController.addListener(_checkUnsavedChanges);
@@ -61,12 +61,23 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
     _nameController.removeListener(_checkUnsavedChanges);
     _nameController.dispose();
     _noteController.dispose();
-    _phoneController.dispose(); // 🔥 NEW: Dispose phone controller
+    _phoneController.dispose();
     super.dispose();
   }
   
   // -------------------------------------------------------------------------
-  // 🔥 NEW: PERSISTENCE CORE LOGIC
+  // 🔥 NEW: DURATION FORMATTER
+  // -------------------------------------------------------------------------
+  /// Converts seconds to a human-readable string (e.g., '1m 35s').
+  String _formatDuration(int seconds) {
+    if (seconds < 60) return '${seconds}s';
+    final minutes = (seconds ~/ 60);
+    final secs = (seconds % 60).toString().padLeft(2, '0');
+    return '${minutes}m ${secs}s';
+  }
+
+  // -------------------------------------------------------------------------
+  // PERSISTENCE CORE LOGIC
   // -------------------------------------------------------------------------
   /// Checks if the lead is transient (no ID) and saves it to Firestore.
   Future<void> _persistLeadIfTransient() async {
@@ -79,8 +90,7 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
         
         // 2. Update the local state with the new persisted lead's ID and original transient data
         setState(() {
-          // 🔥 FIX 3: Ensure all required fields (lastInteraction, lastUpdated) are set when copying
-          // data from the transient lead onto the newly persisted lead.
+          // Copy form data onto the new persisted lead object.
           _lead = persistedLead.copyWith(
             name: _lead.name,
             status: _lead.status,
@@ -90,45 +100,15 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
           );
         });
         
-        // 3. Log the initial call history event
-        await _logCallHistory();
+        // 🔥 REMOVED: The initial call event is now logged by the CallEventHandler 
+        // immediately upon the call starting, not here.
     }
   }
 
   // -------------------------------------------------------------------------
-  // 🔥 MODIFIED: LOG CALL HISTORY
+  // 🔥 REMOVED: _logCallHistory function is now gone.
   // -------------------------------------------------------------------------
-  /// Logs the initial/final call event. This is now only called AFTER 
-  /// the lead is successfully persisted (saved) by the user.
-  Future<void> _logCallHistory() async {
-    // Only log if the form was opened by a call AND history hasn't been added yet.
-    // Also, ensure the lead has been persisted (i.e., has an ID).
-    if (!widget.autoOpenedFromCall || _callHistoryEntryAdded || _lead.id.isEmpty) return;
-    
-    final finalOutcome = _lead.lastCallOutcome;
-    final direction = widget.callDirection ?? 'unknown';
-
-    final outcomeToLog = finalOutcome != 'none' 
-        ? finalOutcome 
-        : direction == 'inbound' ? 'ringing' : 'started';
-    
-    print('📞 Logging call history: $direction - $outcomeToLog');
-
-    try {
-        final updated = await _service.addCallEvent(
-            phone: _lead.phoneNumber,
-            direction: direction,
-            outcome: outcomeToLog,
-        );
-        setState(() {
-            _lead = updated;
-            _callHistoryEntryAdded = true;
-        });
-    } catch(e) {
-        print('❌ Failed to log call history: $e');
-    }
-  }
-
+  
 
   void _checkUnsavedChanges() {
     final currentName = _nameController.text.trim();
@@ -154,7 +134,7 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
   // SAVE LEAD (Triggered by Save button/Status change)
   // -----------------------------------------
   Future<void> _saveLead({String? newStatus, String? newName}) async {
-    // 🔥 FIX 4: Ensure lead is saved/persisted first
+    // Ensure lead is saved/persisted first
     await _persistLeadIfTransient();
 
     final name = newName ?? _nameController.text.trim();
@@ -168,7 +148,7 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
     final updated = _lead.copyWith(
       name: name,
       status: status,
-      // 🔥 FIX 5: Update the required interaction fields on every save
+      // Update the required interaction fields on every save
       lastInteraction: DateTime.now(), 
       lastUpdated: DateTime.now(), 
     );
@@ -189,20 +169,28 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
   // ADD NOTE
   // -----------------------------------------
   Future<void> _addNote() async {
-    final text = _noteController.text.trim();
-    if (text.isEmpty) return;
+  if (_noteController.text.isEmpty) return;
 
-    // 🔥 FIX 6: Ensure lead is saved/persisted first
-    await _persistLeadIfTransient();
-    
-    // Now that we guarantee _lead.id is NOT empty, we can safely call addNote
-    final updated = await _service.addNote(_lead.id, text);
+  final String note = _noteController.text.trim();
+  _noteController.clear();
+
+  try {
+    // ✅ FIX: Call the updated service method with the local _lead object
+    await _service.addNote(lead: _lead, note: note);
+
+    // After saving, refresh the local state to include the new note
+    final updatedLead = await _service.getLead(leadId: _lead.id);
 
     setState(() {
-      _lead = updated;
-      _noteController.clear();
+      if (updatedLead != null) {
+        _lead = updatedLead;
+      }
     });
+  } catch (e) {
+    print('❌ Error adding note: $e');
+    // Handle the exception gracefully, maybe show a snackbar
   }
+}
 
   // -----------------------------------------
   // UI: SECTION TITLE
@@ -277,7 +265,8 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
   // -----------------------------------------
   Widget _callHistorySection() {
     if (_lead.callHistory.isEmpty) {
-      return const Text("No call history yet (Save the lead to log the current call)");
+      // Updated message to reflect handler logs the initial event
+      return const Text("No call history yet (Save the lead to start tracking calls)");
     }
 
     return Column(
@@ -287,13 +276,20 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
                       call.outcome == "missed" ? Colors.red : 
                       call.outcome == "rejected" ? Colors.orange : 
                       Colors.blue;
+        
+        // 🔥 MODIFIED: Display duration if available
+        final durationText = call.durationInSeconds != null
+            ? ' (${_formatDuration(call.durationInSeconds!)})'
+            : '';
+
 
         return Card(
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: ListTile(
             leading: Icon(icon, color: color),
-            title: Text("${call.direction} – ${call.outcome.toUpperCase()}"),
+            // Title includes outcome and duration
+            title: Text("${call.direction} – ${call.outcome.toUpperCase()}$durationText"),
             subtitle: Text(_formatDate(call.timestamp)),
           ),
         );

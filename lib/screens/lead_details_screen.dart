@@ -1,4 +1,3 @@
-// lib/screens/lead_details_screen.dart
 import 'package:flutter/material.dart';
 import '../models/lead.dart';
 import '../services/lead_service.dart';
@@ -43,6 +42,7 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
     Navigator.push(
       context,
       MaterialPageRoute(
+        // Navigation remains to the unified LeadFormScreen
         builder: (_) => LeadFormScreen(lead: _lead),
       ),
     ).then((_) {
@@ -60,6 +60,17 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
       _lead = updated;
       _noteCtrl.clear();
     });
+  }
+
+  // -----------------------------------------
+  // UTIL: DURATION FORMATTER (🔥 NEW)
+  // -----------------------------------------
+  /// Converts seconds to a human-readable string (e.g., '1m 35s').
+  String _formatDuration(int seconds) {
+    if (seconds < 60) return '${seconds}s';
+    final minutes = (seconds ~/ 60);
+    final secs = (seconds % 60).toString().padLeft(2, '0');
+    return '${minutes}m ${secs}s';
   }
 
   // -----------------------------------------
@@ -121,7 +132,7 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
               ),
             ),
             
-            // 🔥 NEW: Display last call outcome
+            // Display last call outcome
             if (_lead.lastCallOutcome != 'none') ...[
               const SizedBox(height: 8),
               Text(
@@ -146,13 +157,12 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
   }
 
   // -----------------------------------------
-  // UI: CALL HISTORY
+  // UI: CALL HISTORY (🔥 UPDATED to show duration)
   // -----------------------------------------
   Widget _callHistory() {
     if (_lead.callHistory.isEmpty) {
       return const Padding(
         padding: EdgeInsets.only(top: 8.0),
-        // 🔥 MODIFIED: Clarify that only final outcomes are logged
         child: Text("No call history recorded (only final outcome logged)."), 
       );
     }
@@ -164,14 +174,19 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
                       call.outcome == "missed" ? Colors.red : 
                       call.outcome == "rejected" ? Colors.orange : 
                       Colors.blue;
+        
+        // Calculate and format duration
+        final durationText = call.durationInSeconds != null
+            ? ' (${_formatDuration(call.durationInSeconds!)})'
+            : '';
                       
         return Card(
           elevation: 1,
           margin: const EdgeInsets.symmetric(vertical: 4),
           child: ListTile(
             leading: Icon(icon, color: color),
-            // 🔥 MODIFIED: Use the single, final outcome for display
-            title: Text("${call.direction} – ${call.outcome.toUpperCase()}"), 
+            // Title includes outcome and duration
+            title: Text("${call.direction} – ${call.outcome.toUpperCase()}$durationText"), 
             subtitle: Text(_formatDate(call.timestamp)),
           ),
         );

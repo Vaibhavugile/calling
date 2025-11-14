@@ -1,5 +1,4 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-// NOTE: firebase_auth is no longer needed/imported for this flat structure.
 import '../models/lead.dart';
 
 // -----------------------------------------------------------------------------
@@ -75,7 +74,7 @@ class LeadService {
     return lead;
   }
   
-  // 🔥 RE-IMPLEMENTED: findOrCreateLead for CallEventHandler compatibility
+  // RE-IMPLEMENTED: findOrCreateLead for CallEventHandler compatibility
   Future<Lead> findOrCreateLead({
     required String phone,
     required String finalOutcome,
@@ -107,11 +106,13 @@ class LeadService {
     return updated;
   }
 
-  // 🔥 RE-IMPLEMENTED: addCallHistoryEntry for UI/CallHandler compatibility
+  // RE-IMPLEMENTED: addCallHistoryEntry for UI/CallHandler compatibility
   Future<Lead> addCallHistoryEntry({
     required String leadId,
     required String direction,
     required String outcome, // answered, missed, ended, rejected, etc.
+    // 🔥 NEW: Added parameter here for consistency, though this method is likely unused now.
+    int? durationInSeconds, 
   }) async {
     final index = _cached.indexWhere((l) => l.id == leadId);
     if (index == -1) throw Exception("Lead not found");
@@ -121,6 +122,7 @@ class LeadService {
       direction: direction,
       outcome: outcome,
       timestamp: DateTime.now(),
+      durationInSeconds: durationInSeconds, // 🔥 NEW: Passed to constructor
     );
 
     // Update lead with the new call history entry and timestamps
@@ -134,10 +136,14 @@ class LeadService {
     return updated;
   }
 
+  // ---------------------------------------------------------------------------
+  // 🔥 FIX: ADDED DURATION PARAMETER & UPDATED LAST CALL OUTCOME LOGIC
+  // ---------------------------------------------------------------------------
   Future<Lead> addCallEvent({
     required String phone,
     required String direction,
     required String outcome,
+    int? durationInSeconds, // 🔥 FIX 1: New optional parameter
   }) async {
     final lead = findByPhone(phone);
     if (lead == null) throw Exception("Lead not found");
@@ -146,32 +152,44 @@ class LeadService {
       direction: direction,
       outcome: outcome,
       timestamp: DateTime.now(),
+      durationInSeconds: durationInSeconds, // 🔥 FIX 2: Pass duration
     );
+
+    // Determine the outcome to display in the list.
+    // Only update lastCallOutcome if it's a final state (answered, missed, etc.)
+    final String newOutcome = (outcome == 'ringing' || outcome == 'started') 
+        ? lead.lastCallOutcome // Keep the current state if it's still ongoing/initial
+        : outcome; // Use the final outcome (answered, missed, rejected, ended)
 
     final updated = lead.copyWith(
       lastInteraction: DateTime.now(),
       lastUpdated: DateTime.now(),
       callHistory: [...lead.callHistory, entry],
+      lastCallOutcome: newOutcome, // 🔥 FIX 3: Update based on final outcome
     );
 
     await saveLead(updated); // Persist updated lead
     return updated;
   }
 
-  Future<Lead> addNote(String id, String text) async {
-    final index = _cached.indexWhere((l) => l.id == id);
-    if (index == -1) throw Exception("Lead not found");
-
-    final note = LeadNote(text: text, timestamp: DateTime.now());
-    final lead = _cached[index];
-    final updated = lead.copyWith(
-      notes: [...lead.notes, note],
-      lastUpdated: DateTime.now(),
-    );
-
-    await saveLead(updated); // Persist updated lead
-    return updated;
+  Future<void> addNote({required Lead lead, required String note}) async {
+  if (lead.id.isEmpty) {
+    throw Exception('Lead must have a valid ID to add a note.');
   }
+
+  final updatedLead = lead.copyWith(
+    notes: [
+      ...lead.notes,
+      LeadNote(
+        timestamp: DateTime.now(),
+        content: note,
+      ),
+    ],
+    lastUpdated: DateTime.now(),
+  );
+
+  await saveLead(updatedLead); // Assuming saveLead handles the update
+}
 
   Future<Lead> updateLead({
     required String id,

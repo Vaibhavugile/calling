@@ -8,12 +8,15 @@ class CallHistoryEntry {
   final String outcome; 
   final DateTime timestamp;
   final String note;
+  // 🔥 NEW: Optional field to store duration in seconds
+  final int? durationInSeconds; 
 
   CallHistoryEntry({
     required this.direction,
     required this.outcome,
     required this.timestamp,
     this.note = '',
+    this.durationInSeconds, // 🔥 NEW: Added to constructor
   });
 
   factory CallHistoryEntry.fromMap(Map<String, dynamic> map) {
@@ -33,6 +36,7 @@ class CallHistoryEntry {
       outcome: (map['outcome'] ?? 'unknown').toString(),
       timestamp: ts,
       note: (map['note'] ?? '').toString(),
+      durationInSeconds: map['durationInSeconds'] as int?, // 🔥 NEW: Read from map
     );
   }
 
@@ -42,6 +46,7 @@ class CallHistoryEntry {
         // store as milliseconds for compactness / compatibility
         'timestamp': timestamp.millisecondsSinceEpoch,
         'note': note,
+        'durationInSeconds': durationInSeconds, // 🔥 NEW: Write to map
       };
 }
 

@@ -21,7 +21,7 @@ class _LeadListScreenState extends State<LeadListScreen> {
 
   final TextEditingController _searchCtrl = TextEditingController();
   
-  // 🔥 NEW: State for the call filter
+  // State for the call filter
   String _selectedFilter = 'All'; 
   final List<String> _filters = [
     'All',
@@ -63,38 +63,39 @@ class _LeadListScreenState extends State<LeadListScreen> {
   void _applySearch() {
     final query = _searchCtrl.text.toLowerCase();
     
-    // First, apply text search
+    // 1. Apply text search
     List<Lead> searchFiltered = _allLeads.where((l) {
       return l.name.toLowerCase().contains(query) ||
              l.phoneNumber.contains(query);
     }).toList();
 
-    // 🔥 Second, apply call filter
+    // 2. Apply call filter
     _filteredLeads = searchFiltered.where((l) {
       if (_selectedFilter == 'All') return true;
+      if (l.callHistory.isEmpty) return false;
 
-      // Filter by Direction (based on the last call's direction)
-      if (_selectedFilter == 'Incoming' && l.callHistory.isNotEmpty && l.callHistory.last.direction == 'inbound') return true;
-      if (_selectedFilter == 'Outgoing' && l.callHistory.isNotEmpty && l.callHistory.last.direction == 'outbound') return true;
+      // 🔥 MODIFIED: Logic to filter by the latest event's direction/outcome
+      final lastCall = l.callHistory.last;
 
-      // Filter by Outcome (based on the new lastCallOutcome field)
+      // Filter by Outcome (uses the new lastCallOutcome field)
       if (_selectedFilter == 'Answered' && l.lastCallOutcome == 'answered') return true;
       if (_selectedFilter == 'Missed' && l.lastCallOutcome == 'missed') return true;
       if (_selectedFilter == 'Rejected' && l.lastCallOutcome == 'rejected') return true;
+      // Note: 'Ended' is not a filter chip, but it's an outcome.
 
-      // If filtering by direction, also include leads with the corresponding outcome
-      if (_selectedFilter == 'Incoming' && (l.lastCallOutcome == 'answered' || l.lastCallOutcome == 'missed' || l.lastCallOutcome == 'rejected')) return true;
-      if (_selectedFilter == 'Outgoing' && (l.lastCallOutcome == 'answered' || l.lastCallOutcome == 'ended')) return true;
-
-
-      return false; // Exclude if not matching the current filter
+      // Filter by Direction (uses the last entry in callHistory)
+      if (_selectedFilter == 'Incoming' && lastCall.direction == 'inbound') return true;
+      if (_selectedFilter == 'Outgoing' && lastCall.direction == 'outbound') return true;
+      
+      // If none of the specific filters matched, exclude the lead
+      return false; 
     }).toList();
 
 
     setState(() {});
   }
   
-  // 🔥 NEW: Method to handle filter change
+  // Method to handle filter change
   void _changeFilter(String filter) {
     setState(() {
       _selectedFilter = filter;
@@ -144,7 +145,11 @@ class _LeadListScreenState extends State<LeadListScreen> {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => LeadDetailsScreen(lead: lead),
+              // 🔥 MODIFIED: LeadDetailsScreen is deprecated, using LeadFormScreen
+              builder: (_) => LeadFormScreen(
+                lead: lead,
+                autoOpenedFromCall: false, // Ensure this is false when opening from list
+              ), 
             ),
           ).then((_) => _loadLeads());
         },
@@ -158,7 +163,7 @@ class _LeadListScreenState extends State<LeadListScreen> {
               children: [
                 _statusChip(lead.status),
                 const SizedBox(width: 8),
-                // 🔥 NEW: Display last call outcome
+                // Display last call outcome
                 if (lead.lastCallOutcome != 'none')
                   Chip(
                     label: Text(
@@ -263,9 +268,9 @@ class _LeadListScreenState extends State<LeadListScreen> {
                   child: _filteredLeads.isEmpty
                       ? const Center(child: Text("No leads found"))
                       : ListView.builder(
-                          itemCount: _filteredLeads.length,
-                          itemBuilder: (_, i) => _leadCard(_filteredLeads[i]),
-                        ),
+                            itemCount: _filteredLeads.length,
+                            itemBuilder: (_, i) => _leadCard(_filteredLeads[i]),
+                          ),
                 ),
               ],
             ),
