@@ -84,22 +84,7 @@
         <!-- ============================
              OUTGOING CALL RECEIVER
         ============================= -->
-        <receiver
-            android:name=".callservice.OutgoingReceiver"
-            android:enabled="true"
-            android:exported="true">
-
-            <!-- Works until Android 11 -->
-            <intent-filter android:priority="999">
-                <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
-            </intent-filter>
-
-            <!-- Required for Android 12/13/14 on Realme/Oppo -->
-            <intent-filter>
-                <action android:name="android.intent.action.CALL" />
-                <action android:name="android.intent.action.DIAL" />
-            </intent-filter>
-        </receiver>
+        
 
         <!-- ============================
              INCOMING CALL RECEIVER
