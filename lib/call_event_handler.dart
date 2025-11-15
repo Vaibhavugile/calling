@@ -60,7 +60,7 @@ class CallEventHandler {
   }
 
   // --------------------------------------------------------------------------
-  // EVENT PROCESSOR (Updated to handle 'answered')
+  // EVENT PROCESSOR (Updated to handle 'answered' and extract 'duration')
   // --------------------------------------------------------------------------
   void _processCallEvent(Map<String, dynamic> event) {
     print('📞 RAW EVENT → $event');
@@ -100,6 +100,7 @@ class CallEventHandler {
       }
 
       // Route to the handler that only logs the event (no UI open)
+      // ✅ FIX: duration is passed to handleCallUpdate
       _handleCallUpdate(
         phoneNumber: phoneNumber,
         direction: event['direction'] as String,
@@ -150,7 +151,8 @@ class CallEventHandler {
     required String phoneNumber,
     required String direction,
     required String outcome,
-    int? duration,
+    // ✅ NEW: duration from Android event
+    int? duration, 
   }) async {
     try {
       // 1. Log the update event (ended, missed, rejected).
@@ -158,6 +160,7 @@ class CallEventHandler {
         phone: phoneNumber,
         direction: direction,
         outcome: outcome,
+        // ✅ NEW: Pass the duration to the service layer
         durationInSeconds: duration, 
       );
 

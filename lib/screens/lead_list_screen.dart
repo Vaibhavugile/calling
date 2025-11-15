@@ -25,6 +25,8 @@ class _LeadListScreenState extends State<LeadListScreen> {
   String _selectedFilter = 'All'; 
   final List<String> _filters = [
     'All',
+    // ✅ NEW FILTER
+    'Needs Review', 
     'Incoming',
     'Outgoing',
     'Answered',
@@ -72,6 +74,13 @@ class _LeadListScreenState extends State<LeadListScreen> {
     // 2. Apply call filter
     _filteredLeads = searchFiltered.where((l) {
       if (_selectedFilter == 'All') return true;
+
+      // ✅ NEW FILTER LOGIC: Leads that are brand new from a call
+      if (_selectedFilter == 'Needs Review') {
+          // A lead is 'Needs Review' if its name is empty AND its status is the default 'new'
+          return l.name.isEmpty && l.status == 'new';
+      }
+
       if (l.callHistory.isEmpty) return false;
 
       // 🔥 MODIFIED: Logic to filter by the latest event's direction/outcome

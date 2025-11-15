@@ -132,6 +132,8 @@ class LeadService {
 
   // ---------------------------------------------------------------------------
   // addCallEvent - Now relies on findByPhone to return the full lead.
+  // 
+  // 🎯 CRITICAL CHANGE: Only update lastUpdated, DO NOT update lastInteraction.
   // ---------------------------------------------------------------------------
   Future<Lead> addCallEvent({
     required String phone,
@@ -162,8 +164,8 @@ class LeadService {
 
     // 🎯 FIX: Use copyWith to ensure we retain the existing name and status from latestLead
     final updated = latestLead.copyWith(
-      lastInteraction: DateTime.now(),
-      lastUpdated: DateTime.now(),
+      // lastInteraction: DateTime.now(), // <-- REMOVED: Automatic call events no longer update lastInteraction.
+      lastUpdated: DateTime.now(), // <-- KEPT: Still update lastUpdated.
       callHistory: [...latestLead.callHistory, entry],
       lastCallOutcome: newOutcome,
     );
@@ -174,6 +176,8 @@ class LeadService {
   }
 
   // Uses getLead to fetch the latest state from Firestore before adding a note
+  // 
+  // ✅ CONFIRMED: Still updates lastInteraction (User action).
   Future<void> addNote({required Lead lead, required String note}) async {
     if (lead.id.isEmpty) {
       throw Exception('Lead must have a valid ID to add a note.');
@@ -199,6 +203,8 @@ class LeadService {
   }
 
   // Now updates lastInteraction on update.
+  // 
+  // ✅ CONFIRMED: Still updates lastInteraction (User action).
   Future<Lead> updateLead({
     required String id,
     String? name,
