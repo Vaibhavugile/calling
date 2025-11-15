@@ -169,6 +169,7 @@ override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                         Pair("inbound", "rejected")
                     // Default to 'ended' for other types or unknown cases where duration might indicate connection
                     else -> {
+                        // Use a generic 'ended' if duration is zero, or 'answered' otherwise
                         if (duration > 0) Pair("unknown", "answered") else Pair("unknown", "ended")
                     }
                 }
@@ -319,8 +320,7 @@ override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
             }
             
             else -> {
-                previousCallState = state  
-                return // Ignore other states or unknown transitions
+                // Any intermediate state that doesn't require an event, or an unknown transition.
             }
         }
 

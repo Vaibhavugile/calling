@@ -21,7 +21,7 @@ class CallEventHandler {
   /// Prevents multiple screens from opening
   bool _screenOpen = false;
 
-  // ✅ FIX: State tracker for call deduplication
+  /// State tracker for call deduplication
   String? _currentlyProcessingCall; 
 
   CallEventHandler({required this.navigatorKey});
@@ -60,52 +60,58 @@ class CallEventHandler {
   }
 
   // --------------------------------------------------------------------------
-  // EVENT PROCESSOR (Updated to handle 'answered' and extract 'duration')
+  // EVENT PROCESSOR
   // --------------------------------------------------------------------------
   void _processCallEvent(Map<String, dynamic> event) {
     print('📞 RAW EVENT → $event');
-    final phoneNumber = event['phoneNumber'] as String;
-    final outcome = event['outcome'] as String;
-
-    if (phoneNumber.isEmpty) {
-      print("! Ignoring call event with empty phone number: $outcome");
+    final phoneNumber = event['phoneNumber'] as String?;
+    final outcome = event['outcome'] as String?;
+    final direction = event['direction'] as String?;
+    
+    // 🔥 NEW: Extract timestamp and duration
+    final timestampMs = event['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch;
+    final duration = event['durationInSeconds'] as int?; 
+    
+    if (phoneNumber == null || phoneNumber.isEmpty || outcome == null || direction == null) {
+      print("! Ignoring invalid call event.");
       return;
     }
 
+    final timestamp = DateTime.fromMillisecondsSinceEpoch(timestampMs);
+
     // 🎯 INITIAL/UI TRIGGER STATES: 'ringing', 'started', 'answered'
-    if (outcome == 'ringing' || outcome == 'started' || outcome == 'answered') {
+    if (['ringing', 'started', 'answered'].contains(outcome)) {
       
-      // We only deduplicate 'ringing' and 'started', as 'answered' must always
-      // be processed to open the UI if the lead is new or existing.
+      // Deduplicate only 'ringing' and 'started' to allow 'answered' to potentially open the UI again
       if ((outcome == 'ringing' || outcome == 'started') && _currentlyProcessingCall == phoneNumber) {
         print("! DEDUPLICATED: Skipping duplicate initial event for $phoneNumber ($outcome)");
         return;
       }
       
-      // Set the tracker for initial events
       _currentlyProcessingCall = phoneNumber; 
       
-      // Route to the handler that finds/creates the lead and opens the UI
       _handleCallStarted(
         phoneNumber: phoneNumber,
-        direction: event['direction'] as String,
+        direction: direction,
         outcome: outcome,
+        timestamp: timestamp, // Pass timestamp
       );
     } 
     // 🎯 TERMINAL STATE LOGIC: 'ended', 'missed', 'rejected'
-    else {
+    else if (['ended', 'missed', 'rejected'].contains(outcome)) {
+      
       // Clear the tracker for terminal events
       if (_currentlyProcessingCall == phoneNumber) {
-          _currentlyProcessingCall = null;
+        _currentlyProcessingCall = null;
       }
 
-      // Route to the handler that only logs the event (no UI open)
-      // ✅ FIX: duration is passed to handleCallUpdate
+      // Route to the handler that logs the final event and checks for review
       _handleCallUpdate(
         phoneNumber: phoneNumber,
-        direction: event['direction'] as String,
+        direction: direction,
         outcome: outcome,
-        duration: event['duration'] as int?,
+        durationInSeconds: duration, // Pass the rich data
+        timestamp: timestamp, // Pass timestamp
       );
     }
   }
@@ -118,28 +124,22 @@ class CallEventHandler {
     required String phoneNumber,
     required String direction,
     required String outcome,
+    required DateTime timestamp, 
   }) async {
     try {
-      // 1. Find or Create (ensures a lead exists and is saved once)
-      // This step fetches/creates the lead and saves a basic update.
-      await _leadService.findOrCreateLead(
-        phone: phoneNumber,
-        finalOutcome: 'none', 
-      );
-
-      // 2. Add Event (Logs the event and saves/returns the updated Lead object with all data)
-      // This step fetches the latest data (including name/email) via getLead and updates history.
+      // 1. Add Event (Logs the event and saves/returns the updated Lead object with all data)
+      // We rely on this method to find or create the lead first.
       final Lead lead = await _leadService.addCallEvent( 
         phone: phoneNumber,
         direction: direction,
         outcome: outcome,
+        timestamp: timestamp, 
         durationInSeconds: null, 
       );
 
-      // 🎯 CRITICAL FIX: Only open the UI on 'ringing' or 'answered' events.
+      // 🎯 CRITICAL: Only open the UI on 'ringing' or 'answered' events.
       if (outcome == 'ringing' || outcome == 'answered') {
           print('📞 New call. Opening UI with lead ID: ${lead.id}');
-          // 3. Open UI: Pass the lead, which contains all pre-filled data and new history.
           _openLeadUI(lead);
       }
     } catch (e) {
@@ -151,31 +151,30 @@ class CallEventHandler {
     required String phoneNumber,
     required String direction,
     required String outcome,
-    // ✅ NEW: duration from Android event
-    int? duration, 
+    required DateTime timestamp,
+    int? durationInSeconds, 
   }) async {
     try {
-      // 1. Log the update event (ended, missed, rejected).
-      await _leadService.addCallEvent(
+      // 🔥 Use a dedicated method for final events to log the event and handle the review flag
+      final Lead? updatedLead = await _leadService.addFinalCallEvent(
         phone: phoneNumber,
         direction: direction,
         outcome: outcome,
-        // ✅ NEW: Pass the duration to the service layer
-        durationInSeconds: duration, 
+        timestamp: timestamp,
+        durationInSeconds: durationInSeconds, 
       );
-
-      // No screen update needed here.
+      
+      if (updatedLead == null) return;
+      
+      // 🎯 CRITICAL FIX: If the service set needsManualReview (missed/rejected call), open the UI.
+      if (updatedLead.needsManualReview) {
+          print('📞 Final event $outcome requires review. Opening UI.');
+          _openLeadUI(updatedLead);
+      }
+      
     } catch (e) {
       print("❌ Error handling call update: $e");
     }
-  }
-
-  // --------------------------------------------------------------------------
-  // UI HANDLERS
-  // --------------------------------------------------------------------------
-  
-  void _updateLeadScreen(Lead updatedLead) {
-    // This is intentionally left simple.
   }
 
   // ---------------------------------------------------------------------------
@@ -204,9 +203,8 @@ class CallEventHandler {
         settings: const RouteSettings(name: '/lead-form'),
         fullscreenDialog: true,
         builder: (_) => LeadFormScreen(
-          // Pass the complete lead object containing all existing data and new history
           lead: lead,
-          autoOpenedFromCall: true,
+          autoOpenedFromCall: true, // Crucial flag for LeadFormScreen.dispose() logic
         ),
       ),
     ).then((_) {

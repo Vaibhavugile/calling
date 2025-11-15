@@ -1,4 +1,5 @@
 // lib/models/lead.dart
+
 import 'dart:math';
 
 /// Call history entry uses DateTime inside the app.
@@ -62,6 +63,8 @@ class Lead {
   final DateTime lastUpdated;
   final List<LeadNote> notes;
   final List<CallHistoryEntry> callHistory;
+  // 🔥 CRITICAL NEW FIELD: Flag to indicate manual follow-up is required
+  final bool needsManualReview;
 
   Lead({
     required this.id,
@@ -74,6 +77,8 @@ class Lead {
     required this.lastUpdated,
     this.notes = const [],
     this.callHistory = const [],
+    // 🔥 CRITICAL NEW FIELD
+    this.needsManualReview = false,
   });
 
   static String generateId() => DateTime.now().millisecondsSinceEpoch.toString() +
@@ -90,6 +95,8 @@ class Lead {
       lastUpdated: DateTime.now(),
       notes: [],
       callHistory: [],
+      // 🔥 CRITICAL NEW FIELD
+      needsManualReview: false,
     );
   }
 
@@ -104,6 +111,8 @@ class Lead {
     DateTime? lastUpdated,
     List<LeadNote>? notes,
     List<CallHistoryEntry>? callHistory,
+    // 🔥 CRITICAL NEW FIELD
+    bool? needsManualReview,
   }) {
     return Lead(
       id: id ?? this.id,
@@ -116,6 +125,8 @@ class Lead {
       lastUpdated: lastUpdated ?? this.lastUpdated,
       notes: notes ?? this.notes,
       callHistory: callHistory ?? this.callHistory,
+      // 🔥 CRITICAL NEW FIELD
+      needsManualReview: needsManualReview ?? this.needsManualReview,
     );
   }
 
@@ -154,6 +165,8 @@ class Lead {
       lastUpdated: lastUpdated,
       notes: notesList.map((e) => LeadNote.fromMap(Map<String, dynamic>.from(e))).toList(),
       callHistory: callsList.map((e) => CallHistoryEntry.fromMap(Map<String, dynamic>.from(e))).toList(),
+      // 🔥 CRITICAL NEW FIELD: Read from map, default to false
+      needsManualReview: (map['needsManualReview'] as bool?) ?? false,
     );
   }
 
@@ -163,11 +176,13 @@ class Lead {
         'phoneNumber': phoneNumber,
         'status': status,
         // 🔥 NEW
-        'lastCallOutcome': lastCallOutcome, 
+        'lastCallOutcome': lastCallOutcome,
         'lastInteraction': lastInteraction.millisecondsSinceEpoch,
         'lastUpdated': lastUpdated.millisecondsSinceEpoch,
         'notes': notes.map((e) => e.toMap()).toList(),
         'callHistory': callHistory.map((e) => e.toMap()).toList(),
+        // 🔥 CRITICAL NEW FIELD
+        'needsManualReview': needsManualReview,
       };
 }
 

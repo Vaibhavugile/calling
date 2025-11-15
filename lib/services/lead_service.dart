@@ -36,21 +36,44 @@ class LeadService {
   // Helper to normalize phone numbers for searching
   String _normalize(String number) => number.replaceAll(RegExp(r'[^0-9+]'), '');
 
+  // Return type is Lead? (nullable)
   Lead? findByPhone(String phone) {
     final normalized = _normalize(phone);
+    // ✅ FIX 1: Use try-catch block to safely handle StateError from firstWhere
     try {
-      return _cached.firstWhere((l) => _normalize(l.phoneNumber) == normalized);
+      // firstWhere will throw a StateError if no element is found.
+      return _cached.firstWhere(
+        (l) => _normalize(l.phoneNumber) == normalized,
+      );
     } catch (_) {
-      return null;
+      // If an error is thrown (i.e., not found), return null, satisfying Lead?.
+      return null; 
     }
   }
 
-  // Fetch a single lead from Firestore by ID. Used for integrity checks.
+  // Fetch a single lead by ID, prioritizing cache but fetching from Firestore if needed
   Future<Lead?> getLead({required String leadId}) async {
+    // 1. Check local cache first
+    // ✅ FIX 2: Use try-catch block for the cache lookup as well.
+    Lead? cachedLead;
     try {
+      // If found, cachedLead is assigned a non-null Lead. If not found, throws.
+      cachedLead = _cached.firstWhere((l) => l.id == leadId);
+    } catch (_) {
+      // If an error is thrown, cachedLead remains/becomes null.
+      cachedLead = null;
+    }
+    
+    if (cachedLead != null) return cachedLead;
+
+    try {
+      // 2. Fetch from Firestore as a fallback
       final doc = await _leadsCollection.doc(leadId).get();
       if (doc.exists) {
-        return Lead.fromMap(doc.data()!);
+        final fetchedLead = Lead.fromMap(doc.data()!);
+        // Add to cache now that we've fetched it
+        _cached.add(fetchedLead); 
+        return fetchedLead;
       }
       return null;
     } catch (e) {
@@ -62,8 +85,9 @@ class LeadService {
   // ---------------------------------------------------------------------------
   // SAVE (The core persistence method)
   // ---------------------------------------------------------------------------
-  Future<void> saveLead(Lead lead) async {
-    try {
+  // Internal save without clearing needsManualReview flag
+  Future<void> _saveLeadToStorage(Lead lead) async {
+      try {
       // 1. Save to Firestore using the lead's ID as the document ID
       await _leadsCollection.doc(lead.id).set(lead.toMap());
       print("✅ [FIRESTORE] Saved lead ${lead.id} to /leads.");
@@ -79,6 +103,16 @@ class LeadService {
       print("❌ [FIRESTORE] Error saving lead: $e");
     }
   }
+  
+  // Public method for manual user save actions (clears review flag)
+  Future<void> saveLead(Lead lead) async {
+    // A manual save/update always implies the lead has been reviewed
+    final leadToSave = lead.copyWith(
+        needsManualReview: false // Clear the flag on any explicit save
+    );
+
+    await _saveLeadToStorage(leadToSave);
+  }
 
   // ---------------------------------------------------------------------------
   // CRUD Operations
@@ -86,14 +120,14 @@ class LeadService {
   Future<Lead> createLead(String phone) async {
     final lead = Lead.newLead(_normalize(phone));
     _cached.add(lead);
-    await saveLead(lead); // Persist to Firestore immediately
+    await _saveLeadToStorage(lead); // Persist to Firestore immediately
     return lead;
   }
   
-  // ✅ FIX APPLIED HERE
+  // Implements the robust lookup: Cache -> Firestore Query -> Create
   Future<Lead> findOrCreateLead({
     required String phone,
-    required String finalOutcome,
+    String finalOutcome = 'none', 
   }) async {
     final normalized = _normalize(phone);
     
@@ -101,89 +135,132 @@ class LeadService {
     Lead? lead = findByPhone(normalized);
 
     if (lead == null) {
-      // 2. If not in cache, search Firestore
-      final querySnapshot = await _leadsCollection
-          .where('phoneNumber', isEqualTo: normalized)
-          .limit(1)
-          .get();
-      
-      if (querySnapshot.docs.isNotEmpty) {
-        // Found in Firestore
-        lead = Lead.fromMap(querySnapshot.docs.first.data());
-      } else {
-        // 3. Create New Lead
-        lead = Lead.newLead(normalized);
-      }
+        // 2. If not in cache, search Firestore by phone number.
+        final querySnapshot = await _leadsCollection
+            .where('phoneNumber', isEqualTo: normalized)
+            .limit(1)
+            .get();
+        
+        if (querySnapshot.docs.isNotEmpty) {
+            // Found in Firestore. Use this lead object.
+            lead = Lead.fromMap(querySnapshot.docs.first.data());
+            // Add to cache now that we've fetched it
+            _cached.add(lead);
+        } else {
+            // 3. CREATE NEW LEAD if not found anywhere
+            lead = Lead.newLead(normalized);
+        }
     }
 
-    // 🎯 FIX: When updating, preserve the existing name and status.
-    // The copyWith method will use the existing values from 'lead' 
-    // for name, status, and callHistory, while updating the timestamps/outcome.
-    final updated = lead.copyWith(
-      lastInteraction: DateTime.now(),
+    // Preserve existing name and status from the found/new lead.
+    final updated = lead!.copyWith( 
       lastUpdated: DateTime.now(),
       lastCallOutcome: finalOutcome, 
     );
 
-    await saveLead(updated);
-    print("DEBUG: Lead returned from findOrCreateLead has name: ${updated.name}");
+    await _saveLeadToStorage(updated);
     return updated;
   }
 
   // ---------------------------------------------------------------------------
-  // addCallEvent - Now relies on findByPhone to return the full lead.
-  // 
-  // 🎯 CRITICAL CHANGE: Only update lastUpdated, DO NOT update lastInteraction.
+  // addCallEvent - For initial/ongoing call states ('ringing', 'started')
   // ---------------------------------------------------------------------------
   Future<Lead> addCallEvent({
     required String phone,
     required String direction,
     required String outcome,
+    required DateTime timestamp, 
     int? durationInSeconds, 
   }) async {
-    // 1. Find lead ID/metadata via cache
-    final Lead? cachedLead = findByPhone(phone);
-    if (cachedLead == null) throw Exception("Lead not found");
+    // 1. Find or create the lead in the background
+    final latestLead = await findOrCreateLead(phone: phone);
 
-    // 2. Fetch the latest lead object from Firestore using the ID
-    // This ensures we get the most up-to-date name/status saved by the user.
-    final latestLead = await getLead(leadId: cachedLead.id);
-    if (latestLead == null) throw Exception("Lead not found in Firestore.");
-
+    // 2. Create history entry
     final entry = CallHistoryEntry(
       direction: direction,
       outcome: outcome,
-      timestamp: DateTime.now(),
+      timestamp: timestamp,
       durationInSeconds: durationInSeconds,
     );
 
-    // Determine the outcome to display in the list.
-    final String newOutcome = (outcome == 'ringing' || outcome == 'started') 
-        ? latestLead.lastCallOutcome // Keep the current state if it's still ongoing/initial
-        : outcome; // Use the final outcome (answered, missed, rejected, ended)
-
-    // 🎯 FIX: Use copyWith to ensure we retain the existing name and status from latestLead
+    // 3. Update the lead, keeping name/status/etc.
     final updated = latestLead.copyWith(
-      // lastInteraction: DateTime.now(), // <-- REMOVED: Automatic call events no longer update lastInteraction.
-      lastUpdated: DateTime.now(), // <-- KEPT: Still update lastUpdated.
+      lastUpdated: DateTime.now(),
       callHistory: [...latestLead.callHistory, entry],
-      lastCallOutcome: newOutcome,
+      // For initial states, don't update lastCallOutcome yet, keep the existing one.
+      lastCallOutcome: latestLead.lastCallOutcome, 
+      needsManualReview: latestLead.needsManualReview, // Keep the current state
     );
 
-    await saveLead(updated); // Persist updated lead
-    print("DEBUG: Lead returned from addCallEvent has name: ${updated.name}");
+    await _saveLeadToStorage(updated); // Use internal save
+    return updated;
+  }
+  
+  // ---------------------------------------------------------------------------
+  // addFinalCallEvent - For terminal call states ('ended', 'missed', 'rejected', 'answered')
+  // ---------------------------------------------------------------------------
+  Future<Lead?> addFinalCallEvent({
+    required String phone,
+    required String direction,
+    required String outcome,
+    required DateTime timestamp,
+    int? durationInSeconds, 
+  }) async {
+    final latestLead = await findOrCreateLead(phone: phone, finalOutcome: outcome);
+    
+    // 1. Determine if MANUAL REVIEW IS REQUIRED based on the outcome
+    bool reviewNeeded = latestLead.needsManualReview; // Preserve current review state
+    if (outcome == 'missed' || outcome == 'rejected') {
+        reviewNeeded = true; // Override to true for missed/rejected calls
+    }
+    
+    // 2. Create history entry
+    final entry = CallHistoryEntry(
+      direction: direction,
+      outcome: outcome,
+      timestamp: timestamp,
+      durationInSeconds: durationInSeconds,
+    );
+
+    // 3. Update the lead
+    final updated = latestLead.copyWith(
+      lastUpdated: DateTime.now(),
+      lastInteraction: DateTime.now(), // Treat final event as interaction time
+      callHistory: [...latestLead.callHistory, entry],
+      lastCallOutcome: outcome, // Set the final outcome
+      needsManualReview: reviewNeeded, // Set the review flag
+    );
+
+    await _saveLeadToStorage(updated); // Use internal save
     return updated;
   }
 
-  // Uses getLead to fetch the latest state from Firestore before adding a note
-  // 
-  // ✅ CONFIRMED: Still updates lastInteraction (User action).
+  // ---------------------------------------------------------------------------
+  // User Actions (Clear review flag)
+  // ---------------------------------------------------------------------------
+
+  // Method required by LeadFormScreen to manually flag a lead
+  Future<void> markLeadForReview(String leadId, bool isNeeded) async {
+    final existingLead = await getLead(leadId: leadId);
+    if (existingLead == null) {
+      print("❌ Lead not found for review update.");
+      return;
+    }
+
+    final updated = existingLead.copyWith(
+      needsManualReview: isNeeded,
+      lastUpdated: DateTime.now(),
+    );
+    
+    await _saveLeadToStorage(updated);
+  }
+
+  // ✅ Ensures addNote clears the needsManualReview flag
   Future<void> addNote({required Lead lead, required String note}) async {
     if (lead.id.isEmpty) {
       throw Exception('Lead must have a valid ID to add a note.');
     }
 
-    // Fetch the latest version from Firestore to prevent overwriting concurrent updates
     final latestLead = await getLead(leadId: lead.id);
     if (latestLead == null) throw Exception("Lead not found for note update.");
     
@@ -197,21 +274,19 @@ class LeadService {
       ],
       lastUpdated: DateTime.now(),
       lastInteraction: DateTime.now(), // A note is an interaction
+      needsManualReview: false, // CLEAR the flag on adding a note
     );
 
-    await saveLead(updatedLead); 
+    await _saveLeadToStorage(updatedLead); // Use internal save
   }
 
-  // Now updates lastInteraction on update.
-  // 
-  // ✅ CONFIRMED: Still updates lastInteraction (User action).
+  // ✅ Ensures updateLead clears the needsManualReview flag
   Future<Lead> updateLead({
     required String id,
     String? name,
     String? status,
     String? phoneNumber,
   }) async {
-    // Fetch the latest version from Firestore to prevent overwriting concurrent updates
     final existingLead = await getLead(leadId: id);
     if (existingLead == null) throw Exception("Lead not found for update.");
 
@@ -220,13 +295,17 @@ class LeadService {
       status: status ?? existingLead.status,
       phoneNumber: phoneNumber ?? existingLead.phoneNumber,
       lastUpdated: DateTime.now(),
-      lastInteraction: DateTime.now(),
+      lastInteraction: DateTime.now(), // Manual update is an interaction
+      needsManualReview: false, // CLEAR the flag on manual update
     );
 
-    await saveLead(updated); // Persist updated lead
+    await _saveLeadToStorage(updated); // Use internal save
     return updated;
   }
 
+  // ---------------------------------------------------------------------------
+  // DELETE
+  // ---------------------------------------------------------------------------
   Future<void> deleteLead(String id) async {
     try {
       await _leadsCollection.doc(id).delete();
