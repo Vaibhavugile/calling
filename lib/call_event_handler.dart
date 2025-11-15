@@ -60,44 +60,46 @@ class CallEventHandler {
   }
 
   // --------------------------------------------------------------------------
-  // EVENT PROCESSOR (Now includes deduplication logic)
+  // EVENT PROCESSOR (Updated to handle 'answered')
   // --------------------------------------------------------------------------
   void _processCallEvent(Map<String, dynamic> event) {
     print('📞 RAW EVENT → $event');
     final phoneNumber = event['phoneNumber'] as String;
-    // final direction = event['direction'] as String; // Not used directly here
     final outcome = event['outcome'] as String;
-    // final duration = event['duration'] as int?; // Not used directly here
 
     if (phoneNumber.isEmpty) {
       print("! Ignoring call event with empty phone number: $outcome");
       return;
     }
 
-    // 🎯 DEDUPLICATION LOGIC
-    if (outcome == 'ringing' || outcome == 'started') {
-      if (_currentlyProcessingCall == phoneNumber) {
+    // 🎯 INITIAL/UI TRIGGER STATES: 'ringing', 'started', 'answered'
+    if (outcome == 'ringing' || outcome == 'started' || outcome == 'answered') {
+      
+      // We only deduplicate 'ringing' and 'started', as 'answered' must always
+      // be processed to open the UI if the lead is new or existing.
+      if ((outcome == 'ringing' || outcome == 'started') && _currentlyProcessingCall == phoneNumber) {
         print("! DEDUPLICATED: Skipping duplicate initial event for $phoneNumber ($outcome)");
         return;
       }
-      // If it's a new ringing/started event, set the tracker
+      
+      // Set the tracker for initial events
       _currentlyProcessingCall = phoneNumber; 
       
-      // Pass the event to the original handler
+      // Route to the handler that finds/creates the lead and opens the UI
       _handleCallStarted(
         phoneNumber: phoneNumber,
         direction: event['direction'] as String,
         outcome: outcome,
       );
     } 
-    // 🎯 TERMINAL STATE LOGIC
+    // 🎯 TERMINAL STATE LOGIC: 'ended', 'missed', 'rejected'
     else {
-      // Clear the tracker for terminal events (ended, missed, rejected)
+      // Clear the tracker for terminal events
       if (_currentlyProcessingCall == phoneNumber) {
-         _currentlyProcessingCall = null;
+          _currentlyProcessingCall = null;
       }
 
-      // Pass the event to the original handler
+      // Route to the handler that only logs the event (no UI open)
       _handleCallUpdate(
         phoneNumber: phoneNumber,
         direction: event['direction'] as String,
@@ -109,7 +111,7 @@ class CallEventHandler {
 
 
   // --------------------------------------------------------------------------
-  // HANDLERS (Ensures existing lead data is preserved and updated)
+  // HANDLERS 
   // --------------------------------------------------------------------------
   void _handleCallStarted({
     required String phoneNumber,
@@ -118,13 +120,14 @@ class CallEventHandler {
   }) async {
     try {
       // 1. Find or Create (ensures a lead exists and is saved once)
+      // This step fetches/creates the lead and saves a basic update.
       await _leadService.findOrCreateLead(
         phone: phoneNumber,
-        // Using 'none' here as the final outcome is determined by the last event
         finalOutcome: 'none', 
       );
 
-      // 2. Add Event (Logs the 'ringing'/'started' event and saves/returns the updated Lead)
+      // 2. Add Event (Logs the event and saves/returns the updated Lead object with all data)
+      // This step fetches the latest data (including name/email) via getLead and updates history.
       final Lead lead = await _leadService.addCallEvent( 
         phone: phoneNumber,
         direction: direction,
@@ -132,9 +135,12 @@ class CallEventHandler {
         durationInSeconds: null, 
       );
 
-      print('📞 New call. Opening UI with lead ID: ${lead.id}');
-      // 3. Open UI: Pass the lead, which contains all pre-filled data and new history.
-      _openLeadUI(lead);
+      // 🎯 CRITICAL FIX: Only open the UI on 'ringing' or 'answered' events.
+      if (outcome == 'ringing' || outcome == 'answered') {
+          print('📞 New call. Opening UI with lead ID: ${lead.id}');
+          // 3. Open UI: Pass the lead, which contains all pre-filled data and new history.
+          _openLeadUI(lead);
+      }
     } catch (e) {
       print("❌ Error handling call start: $e");
     }
@@ -147,8 +153,7 @@ class CallEventHandler {
     int? duration,
   }) async {
     try {
-      // 1. Log the update event (answered, ended, missed, rejected).
-      // This implicitly updates the existing lead in the database.
+      // 1. Log the update event (ended, missed, rejected).
       await _leadService.addCallEvent(
         phone: phoneNumber,
         direction: direction,
@@ -156,8 +161,7 @@ class CallEventHandler {
         durationInSeconds: duration, 
       );
 
-      // No screen update needed here; the form screen should refresh on its own if active.
-      
+      // No screen update needed here.
     } catch (e) {
       print("❌ Error handling call update: $e");
     }
@@ -167,7 +171,6 @@ class CallEventHandler {
   // UI HANDLERS
   // --------------------------------------------------------------------------
   
-  // Empty implementation of a method that used to cause 'LeadFormScreenState' errors
   void _updateLeadScreen(Lead updatedLead) {
     // This is intentionally left simple.
   }
@@ -201,7 +204,6 @@ class CallEventHandler {
           // Pass the complete lead object containing all existing data and new history
           lead: lead,
           autoOpenedFromCall: true,
-          // Removed 'callDirection' parameter, as it is obsolete.
         ),
       ),
     ).then((_) {

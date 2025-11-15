@@ -45,7 +45,7 @@ class LeadService {
     }
   }
 
-  // ✅ NEW: Fetch a single lead from Firestore by ID. Used for integrity checks.
+  // Fetch a single lead from Firestore by ID. Used for integrity checks.
   Future<Lead?> getLead({required String leadId}) async {
     try {
       final doc = await _leadsCollection.doc(leadId).get();
@@ -90,7 +90,7 @@ class LeadService {
     return lead;
   }
   
-  // ✅ UPDATED: Added Firestore check if not found in cache.
+  // ✅ FIX APPLIED HERE
   Future<Lead> findOrCreateLead({
     required String phone,
     required String finalOutcome,
@@ -116,7 +116,9 @@ class LeadService {
       }
     }
 
-    // Update the lead's interaction time and outcome for list filtering
+    // 🎯 FIX: When updating, preserve the existing name and status.
+    // The copyWith method will use the existing values from 'lead' 
+    // for name, status, and callHistory, while updating the timestamps/outcome.
     final updated = lead.copyWith(
       lastInteraction: DateTime.now(),
       lastUpdated: DateTime.now(),
@@ -124,13 +126,12 @@ class LeadService {
     );
 
     await saveLead(updated);
+    print("DEBUG: Lead returned from findOrCreateLead has name: ${updated.name}");
     return updated;
   }
 
-  // addCallHistoryEntry method is retained for potential future use...
-
   // ---------------------------------------------------------------------------
-  // ✅ FIX: Uses getLead to fetch the latest state from Firestore before updating
+  // addCallEvent - Now relies on findByPhone to return the full lead.
   // ---------------------------------------------------------------------------
   Future<Lead> addCallEvent({
     required String phone,
@@ -143,6 +144,7 @@ class LeadService {
     if (cachedLead == null) throw Exception("Lead not found");
 
     // 2. Fetch the latest lead object from Firestore using the ID
+    // This ensures we get the most up-to-date name/status saved by the user.
     final latestLead = await getLead(leadId: cachedLead.id);
     if (latestLead == null) throw Exception("Lead not found in Firestore.");
 
@@ -158,6 +160,7 @@ class LeadService {
         ? latestLead.lastCallOutcome // Keep the current state if it's still ongoing/initial
         : outcome; // Use the final outcome (answered, missed, rejected, ended)
 
+    // 🎯 FIX: Use copyWith to ensure we retain the existing name and status from latestLead
     final updated = latestLead.copyWith(
       lastInteraction: DateTime.now(),
       lastUpdated: DateTime.now(),
@@ -166,10 +169,11 @@ class LeadService {
     );
 
     await saveLead(updated); // Persist updated lead
+    print("DEBUG: Lead returned from addCallEvent has name: ${updated.name}");
     return updated;
   }
 
-  // ✅ FIX: Uses getLead to fetch the latest state from Firestore before adding a note
+  // Uses getLead to fetch the latest state from Firestore before adding a note
   Future<void> addNote({required Lead lead, required String note}) async {
     if (lead.id.isEmpty) {
       throw Exception('Lead must have a valid ID to add a note.');
@@ -183,9 +187,9 @@ class LeadService {
       notes: [
         ...latestLead.notes,
         LeadNote(
-  timestamp: DateTime.now(),
-  text: note, // ⬅️ FIX IS HERE
-),
+          timestamp: DateTime.now(),
+          text: note,
+        ),
       ],
       lastUpdated: DateTime.now(),
       lastInteraction: DateTime.now(), // A note is an interaction
@@ -194,21 +198,21 @@ class LeadService {
     await saveLead(updatedLead); 
   }
 
-  // ✅ UPDATED: Now updates lastInteraction on update.
+  // Now updates lastInteraction on update.
   Future<Lead> updateLead({
     required String id,
     String? name,
     String? status,
     String? phoneNumber,
   }) async {
-    final index = _cached.indexWhere((l) => l.id == id);
-    if (index == -1) throw Exception("Lead not found");
+    // Fetch the latest version from Firestore to prevent overwriting concurrent updates
+    final existingLead = await getLead(leadId: id);
+    if (existingLead == null) throw Exception("Lead not found for update.");
 
-    final lead = _cached[index];
-    final updated = lead.copyWith(
-      name: name ?? lead.name,
-      status: status ?? lead.status,
-      phoneNumber: phoneNumber ?? lead.phoneNumber,
+    final updated = existingLead.copyWith(
+      name: name ?? existingLead.name,
+      status: status ?? existingLead.status,
+      phoneNumber: phoneNumber ?? existingLead.phoneNumber,
       lastUpdated: DateTime.now(),
       lastInteraction: DateTime.now(),
     );

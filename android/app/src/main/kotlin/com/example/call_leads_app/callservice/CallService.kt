@@ -8,8 +8,8 @@ import android.content.Intent
 import android.database.Cursor
 import android.os.Build
 import android.os.IBinder
-import android.os.Handler // <-- ADD THIS IMPORT
-import android.os.Looper // <-- ADD THIS IMPORT
+import android.os.Handler 
+import android.os.Looper 
 import android.provider.CallLog 
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
@@ -30,6 +30,7 @@ class CallService : Service() {
     private var currentCallDirection: String? = null
     
     private var previousCallState: Int = TelephonyManager.CALL_STATE_IDLE
+    private var lastCallEndTime: Long = 0 // ✅ FIX: Tracker for call end cooldown
 
     override fun onCreate() {
         super.onCreate()
@@ -39,53 +40,68 @@ class CallService : Service() {
         createChannel()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d("CallService", "🚀 onStartCommand: $intent")
+override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    Log.d("CallService", "🚀 onStartCommand: $intent")
 
-        val number = intent?.getStringExtra("phoneNumber") ?: ""
-        val direction = intent?.getStringExtra("direction") ?: "unknown"
-        val event = intent?.getStringExtra("event") ?: "unknown"
+    val number = intent?.getStringExtra("phoneNumber") ?: ""
+    val direction = intent?.getStringExtra("direction") ?: "unknown"
+    val event = intent?.getStringExtra("event") ?: "unknown"
 
-        Log.d("CallService", "📞 Initial event=$event  number=$number  dir=$direction")
+    Log.d("CallService", "📞 Initial event=$event  number=$number  dir=$direction")
 
-        // 1. STORE state, but ONLY if started by IncomingReceiver (inbound)
-        if (number.isNotEmpty() && direction == "inbound") {
-            currentCallNumber = number
-            currentCallDirection = direction
-        }
-        
-        // This block handles the OUTBOUND case started by OutgoingReceiver.
-        // It sets the trackers before the listener fires the OFFHOOK state.
-        if (number.isNotEmpty() && direction == "outbound") {
-             currentCallNumber = number
-             currentCallDirection = direction
-             // Send the 'started' event immediately, before the OFFHOOK
-             sendEvent(number, direction, "started")
-             // Do NOT return here, we need to register the listener below.
-        }
-
-        // 2. Send initial event (e.g., 'ringing' for incoming). Ignore 'state_change' event from receiver.
-        if (event != "unknown" && direction == "inbound") {
-            sendEvent(number, direction, event)
-        }
-
-        // 3. Register the call state listener (handles all state changes)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            telephonyManager.registerTelephonyCallback(
-                mainExecutor,
-                CallStateCallback(this)
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            telephonyManager.listen(
-                CallStateListener(this),
-                PhoneStateListener.LISTEN_CALL_STATE
-            )
-        }
-
+    // ✅ FIX 1 (Cooldown): Ignore rapid restarts/IDLE broadcasts right after a call ended
+    if (event == "state_change" && System.currentTimeMillis() - lastCallEndTime < 2000) {
+        Log.d("CallService", "⚠️ Ignoring rapid IDLE broadcast after call end (cooldown).")
         startForeground(1, buildNotification())
         return START_NOT_STICKY
     }
+
+    // 1. Handle Outbound (OutgoingReceiver)
+    // If the number is present and direction is set to outbound by OutgoingReceiver.
+    if (number.isNotEmpty() && direction == "outbound") {
+         currentCallNumber = number
+         currentCallDirection = direction
+         // Send the 'started' event immediately, before the OFFHOOK
+         sendEvent(number, direction, "started")
+    }
+
+    // 2. Handle Inbound (IncomingReceiver - RINGING)
+    // If the number is present and direction is set to inbound.
+    else if (number.isNotEmpty() && direction == "inbound") {
+        currentCallNumber = number
+        currentCallDirection = direction
+        // Send initial event (e.g., 'ringing' for incoming).
+        if (event != "unknown") {
+            sendEvent(number, direction, event)
+        }
+    }
+    
+    // ✅ NEW CRITICAL FIX: Handle Outbound/IncomingReceiver OFFHOOK broadcast
+    // On some devices, IncomingReceiver gets the number during OFFHOOK
+    // We trust this number if we don't have one yet.
+    else if (number.isNotEmpty() && currentCallNumber.isNullOrEmpty()) {
+        Log.d("CallService", "✅ Fallback to IncomingReceiver OFFHOOK number: $number. Overriding Call Log.")
+        currentCallNumber = number
+        currentCallDirection = "outbound" // Assume outbound if not marked as inbound/ringing
+    }
+
+    // 3. Register the call state listener (handles all state changes)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        telephonyManager.registerTelephonyCallback(
+            mainExecutor,
+            CallStateCallback(this)
+        )
+    } else {
+        @Suppress("DEPRECATION")
+        telephonyManager.listen(
+            CallStateListener(this),
+            PhoneStateListener.LISTEN_CALL_STATE
+        )
+    }
+
+    startForeground(1, buildNotification())
+    return START_NOT_STICKY
+}
 
     private fun getOutgoingNumberFromCallLog(): String {
         var cursor: Cursor? = null
@@ -133,9 +149,9 @@ class CallService : Service() {
 
             Log.d("CallService", "📞 Detected Outgoing Call Start (IDLE -> OFFHOOK)")
 
-            // Case A: OutgoingReceiver successfully passed the number. Send 'answered'.
+            // Case A: OutgoingReceiver successfully passed the number, OR the fast IncomingReceiver fallback ran.
             if (currentCallNumber.isNullOrEmpty() == false) {
-                 // The 'started' event was already sent in onStartCommand.
+                 // The 'started' event was already sent in onStartCommand (or implicitly handled).
                  // We send 'answered' now.
                  sendEvent(currentCallNumber!!, "outbound", "answered")
                  previousCallState = state 
@@ -145,10 +161,26 @@ class CallService : Service() {
             // Case B: OutgoingReceiver failed or was blocked. Fallback to Call Log with delay.
             Log.d("CallService", "⚠️ Outgoing number unknown. Falling back to Call Log with 500ms delay.")
 
-            // 🔥 CRITICAL FIX: Run the delaying logic on a new thread.
+            // 🔥 CRITICAL FIX 2 (Race Condition Cancellation): 
+            // If the faster IncomingReceiver broadcast set the current number *after* this method started 
+            // but *before* the Call Log thread runs, we must cancel the Call Log attempt.
+            if (currentCallNumber.isNullOrEmpty() == false) { 
+                 Log.d("CallService", "⚠️ Call Log fallback cancelled: number (${currentCallNumber}) was set by a faster broadcast.")
+                 previousCallState = state
+                 return
+            }
+
+            // If we reach here, we must use the Call Log fallback.
             Thread {
                 try {
                     Thread.sleep(500) // 500ms delay to wait for OS to update CallLog.
+                    
+                    // We need a final check here too, in case another broadcast came in during the sleep.
+                    if (currentCallNumber.isNullOrEmpty() == false) {
+                        Log.d("CallService", "⚠️ Call Log fallback cancelled post-sleep: currentCallNumber already set.")
+                        return@Thread
+                    }
+
                     val outgoingNumber = getOutgoingNumberFromCallLog()
                     
                     if (outgoingNumber.isNotEmpty()) {
@@ -157,7 +189,7 @@ class CallService : Service() {
                         currentCallNumber = outgoingNumber
                         currentCallDirection = "outbound"
 
-                        // 🔥 CRITICAL FIX: Post the event sending back to the main thread!
+                        // Post the event sending back to the main thread!
                         Handler(Looper.getMainLooper()).post {
                             // Send both 'started' and 'answered' events from the background thread
                             sendEvent(outgoingNumber, "outbound", "started")
@@ -210,6 +242,7 @@ class CallService : Service() {
             // Clear the tracked number/direction after the call ends
             currentCallNumber = null
             currentCallDirection = null
+            lastCallEndTime = System.currentTimeMillis() // ✅ FIX: Record end time for cooldown
         }
         
         // 4. Send the event

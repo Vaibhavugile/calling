@@ -21,8 +21,6 @@ class IncomingReceiver : BroadcastReceiver() {
 
         Log.d("IncomingReceiver", "📞 State=$state  Incoming=$number")
 
-        // 🎯 CRITICAL CHANGE: Start the CallService for ALL state changes.
-        // The CallService logic will handle what happens next.
         val serviceIntent = Intent(context, CallService::class.java)
         
         // Only set direction/event if it's explicitly an incoming ringing call
@@ -31,8 +29,17 @@ class IncomingReceiver : BroadcastReceiver() {
             serviceIntent.putExtra("direction", "inbound")
             serviceIntent.putExtra("phoneNumber", number ?: "")
             serviceIntent.putExtra("event", "ringing")
-        } else {
-            // For all other states (OFFHOOK, IDLE), send generic info
+        } 
+        
+        // ✅ FIX: Skip starting the service if it's IDLE and no specific number is provided.
+        // The running CallService should already handle the end of the call via its listener.
+        else if (state == TelephonyManager.EXTRA_STATE_IDLE && number.isNullOrEmpty()) {
+            Log.d("IncomingReceiver", "⚠️ Ignoring IDLE broadcast with null number.")
+            return
+        }
+        
+        else {
+            // For all other states (OFFHOOK, IDLE with a number), send generic info
             serviceIntent.putExtra("direction", "unknown")
             serviceIntent.putExtra("phoneNumber", number ?: "")
             serviceIntent.putExtra("event", "state_change") // Signals CallService to use its internal listener
