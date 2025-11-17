@@ -1,36 +1,26 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.example.call_leads_app">
 
-    <!-- ============================
-         PERMISSIONS
-    ============================= -->
+    <uses-permission android:name="android.permission.INTERNET"/>
 
-    <!-- Phone + call state -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
 
-    <!-- Call logs for history -->
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
 
-    <!-- Outgoing call detection (deprecated but needed for older Android) -->
+    <!-- Deprecated on newer Android, but kept for older devices -->
     <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
 
-    <!-- Foreground service (Android 12+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
 
-    <!-- Notifications (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- For autostart after reboot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- Allow showing alert dialogs when app is backgrounded -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
-    <!-- ============================
-         QUERY INTENTS (Android 11+)
-    ============================= -->
     <queries>
         <intent>
             <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
@@ -41,70 +31,106 @@
         <intent>
             <action android:name="android.intent.action.CALL" />
         </intent>
-        <intent>
-            <action android:name="android.intent.action.DIAL" />
-        </intent>
     </queries>
 
-    <!-- ============================
-         APPLICATION
-    ============================= -->
     <application
+        android:label="call_leads_app"
         android:name="${applicationName}"
-        android:label="Call Leads"
         android:icon="@mipmap/ic_launcher"
-        android:enableOnBackInvokedCallback="true"
         android:usesCleartextTraffic="true">
 
-        <!-- ============================
-             MAIN ACTIVITY
-        ============================= -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTask"
+            android:launchMode="singleTop"
             android:theme="@style/LaunchTheme"
-            android:windowSoftInputMode="adjustResize"
-            android:configChanges="orientation|screenLayout|density|keyboardHidden|keyboard|smallestScreenSize|uiMode|screenSize|fontScale|layoutDirection">
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
 
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+
+            <!-- Launcher -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Make this activity a dialer candidate (for default Phone role) -->
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.CALL" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="tel" />
+            </intent-filter>
         </activity>
 
-        <!-- ============================
-             CALL SERVICE
-        ============================= -->
+        <!-- Existing CallService -->
         <service
             android:name=".callservice.CallService"
             android:exported="false"
             android:foregroundServiceType="phoneCall" />
 
-        <!-- ============================
-             OUTGOING CALL RECEIVER
-        ============================= -->
-        
+        <!-- NEW: InCallService for full lifecycle callbacks when default dialer -->
+        <service
+            android:name=".callservice.MyInCallService"
+            android:exported="true"
+            android:permission="android.permission.BIND_INCALL_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.InCallService" />
+            </intent-filter>
+        </service>
 
-        <!-- ============================
-             INCOMING CALL RECEIVER
-        ============================= -->
+        <!-- NEW: CallRedirectionService (Android 10+) for outgoing calls -->
+        <service
+            android:name=".callservice.MyCallRedirectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_CALL_REDIRECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.CallRedirectionService" />
+            </intent-filter>
+        </service>
+
+        <!-- Existing receivers for older Android / extra robustness -->
+
+        <receiver
+            android:name=".callservice.OutgoingReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter android:priority="999">
+                <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
+                <data android:scheme="tel" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".callservice.IncomingReceiver"
             android:enabled="true"
             android:exported="true">
-
             <intent-filter android:priority="999">
                 <action android:name="android.intent.action.PHONE_STATE" />
             </intent-filter>
 
-            <!-- Handles Android 12+ background restrictions -->
             <intent-filter>
                 <action android:name="android.intent.action.ANSWER" />
             </intent-filter>
         </receiver>
 
-        <!-- Flutter embedding -->
+        <receiver
+            android:name=".callservice.BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

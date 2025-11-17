@@ -21,8 +21,15 @@ class CallEventHandler {
   /// Prevents multiple screens from opening
   bool _screenOpen = false;
 
-  /// State tracker for call deduplication
-  String? _currentlyProcessingCall; 
+  /// State tracker for call deduplication: maps phoneNumber -> lastTimestampMs processed
+  final Map<String, int> _lastProcessedTimestampMs = {};
+
+  /// Optional flag to mark a call being actively processed (phone -> bool)
+  final Set<String> _activeCalls = {};
+
+  /// A short dedup window (ms) to ignore near-duplicate initial events
+  /// (2000 ms = 2 seconds)
+  static const int _dedupWindowMs = 2000;
 
   CallEventHandler({required this.navigatorKey});
 
@@ -31,14 +38,16 @@ class CallEventHandler {
   // --------------------------------------------------------------------------
   void startListening() {
     print("📞 [CALL HANDLER] START LISTENING");
-    
-    _subscription = _eventChannel
-        .receiveBroadcastStream()
-        .listen(
+
+    _subscription = _eventChannel.receiveBroadcastStream().listen(
       (event) {
-        // Explicitly create a new Map<String, dynamic> from the raw event
-        final Map<String, dynamic> typedEvent = Map<String, dynamic>.from(event as Map);
-        _processCallEvent(typedEvent);
+        try {
+          final Map<String, dynamic> typedEvent =
+              Map<String, dynamic>.from(event as Map);
+          _processCallEvent(typedEvent);
+        } catch (e) {
+          print("❌ Error parsing incoming event: $e — raw event: $event");
+        }
       },
       onError: (error) {
         print("❌ STREAM ERROR: $error");
@@ -54,7 +63,7 @@ class CallEventHandler {
     _subscription = null;
     print("🛑 [CALL HANDLER] STOP LISTENING");
   }
-  
+
   void dispose() {
     stopListening();
   }
@@ -63,87 +72,125 @@ class CallEventHandler {
   // EVENT PROCESSOR
   // --------------------------------------------------------------------------
   void _processCallEvent(Map<String, dynamic> event) {
-    print('📞 RAW EVENT → $event');
-    final phoneNumber = event['phoneNumber'] as String?;
-    final outcome = event['outcome'] as String?;
-    final direction = event['direction'] as String?;
-    
-    // 🔥 NEW: Extract timestamp and duration
-    final timestampMs = event['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch;
-    final duration = event['durationInSeconds'] as int?; 
-    
-    if (phoneNumber == null || phoneNumber.isEmpty || outcome == null || direction == null) {
-      print("! Ignoring invalid call event.");
+    // Improved logging
+    print('📞 RAW EVENT RECEIVED → $event');
+
+    final phoneNumber = (event['phoneNumber'] as String?)?.trim();
+    final outcome = (event['outcome'] as String?)?.trim();
+    final direction = (event['direction'] as String?)?.trim();
+
+    final timestampMs =
+        (event['timestamp'] is int) ? event['timestamp'] as int : null;
+    final duration = (event['durationInSeconds'] is int)
+        ? event['durationInSeconds'] as int
+        : null;
+
+    final int eventTimestamp =
+        timestampMs ?? DateTime.now().millisecondsSinceEpoch;
+
+    if (phoneNumber == null ||
+        phoneNumber.isEmpty ||
+        outcome == null ||
+        direction == null) {
+      print("! Ignoring invalid or incomplete call event.");
       return;
     }
 
-    final timestamp = DateTime.fromMillisecondsSinceEpoch(timestampMs);
+    // Deduplication: ignore repeated initial events within _dedupWindowMs
+    final lastTs = _lastProcessedTimestampMs[phoneNumber];
+    if (lastTs != null &&
+        (eventTimestamp - lastTs).abs() < _dedupWindowMs &&
+        _isInitialEvent(outcome)) {
+      print(
+          "! DEDUPLICATED: Ignoring quick duplicate event for $phoneNumber ($outcome). Δ=${(eventTimestamp - lastTs).abs()}ms");
+      return;
+    }
 
-    // 🎯 INITIAL/UI TRIGGER STATES: 'ringing', 'started', 'answered'
-    if (['ringing', 'started', 'answered'].contains(outcome)) {
-      
-      // Deduplicate only 'ringing' and 'started' to allow 'answered' to potentially open the UI again
-      if ((outcome == 'ringing' || outcome == 'started') && _currentlyProcessingCall == phoneNumber) {
-        print("! DEDUPLICATED: Skipping duplicate initial event for $phoneNumber ($outcome)");
-        return;
-      }
-      
-      _currentlyProcessingCall = phoneNumber; 
-      
-      _handleCallStarted(
-        phoneNumber: phoneNumber,
-        direction: direction,
-        outcome: outcome,
-        timestamp: timestamp, // Pass timestamp
-      );
-    } 
-    // 🎯 TERMINAL STATE LOGIC: 'ended', 'missed', 'rejected'
-    else if (['ended', 'missed', 'rejected'].contains(outcome)) {
-      
-      // Clear the tracker for terminal events
-      if (_currentlyProcessingCall == phoneNumber) {
-        _currentlyProcessingCall = null;
+    // Update last-processed timestamp for this phone number for any event
+    _lastProcessedTimestampMs[phoneNumber] = eventTimestamp;
+
+    // Terminal events: ended/missed/rejected
+    if (_isTerminalEvent(outcome)) {
+      // Clear active marker for this call (if present)
+      if (_activeCalls.contains(phoneNumber)) {
+        _activeCalls.remove(phoneNumber);
       }
 
-      // Route to the handler that logs the final event and checks for review
       _handleCallUpdate(
         phoneNumber: phoneNumber,
         direction: direction,
         outcome: outcome,
-        durationInSeconds: duration, // Pass the rich data
-        timestamp: timestamp, // Pass timestamp
+        durationInSeconds: duration,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(eventTimestamp),
       );
+      return;
     }
+
+    // Initial / UI-trigger events: ringing, outgoing_start, answered
+    if (_isInitialEvent(outcome)) {
+      // If screen already open for another call, don't open again — but still record events
+      if (_activeCalls.contains(phoneNumber)) {
+        // We already processed a start for this call; skip UI logic but still log/state.
+        print("! Already processing call for $phoneNumber — skipping repeated start event.");
+        return;
+      }
+
+      // Mark as active to prevent duplicates opening UI
+      _activeCalls.add(phoneNumber);
+
+      _handleCallStarted(
+        phoneNumber: phoneNumber,
+        direction: direction,
+        outcome: outcome,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(eventTimestamp),
+      );
+
+      return;
+    }
+
+    // If we reach here, the event is unknown; log it
+    print("! Unhandled event outcome: $outcome for $phoneNumber");
   }
 
+  bool _isInitialEvent(String outcome) {
+    return outcome == 'ringing' ||
+        outcome == 'outgoing_start' ||
+        outcome == 'answered';
+  }
+
+  bool _isTerminalEvent(String outcome) {
+    return outcome == 'ended' || outcome == 'missed' || outcome == 'rejected';
+  }
 
   // --------------------------------------------------------------------------
-  // HANDLERS 
+  // HANDLERS
   // --------------------------------------------------------------------------
   void _handleCallStarted({
     required String phoneNumber,
     required String direction,
     required String outcome,
-    required DateTime timestamp, 
+    required DateTime timestamp,
   }) async {
     try {
-      // 1. Add Event (Logs the event and saves/returns the updated Lead object with all data)
-      // We rely on this method to find or create the lead first.
-      final Lead lead = await _leadService.addCallEvent( 
+      final Lead lead = await _leadService.addCallEvent(
         phone: phoneNumber,
         direction: direction,
         outcome: outcome,
-        timestamp: timestamp, 
-        durationInSeconds: null, 
+        timestamp: timestamp,
+        durationInSeconds: null,
       );
 
-      // 🎯 CRITICAL: Only open the UI on 'ringing' or 'answered' events.
-      if (outcome == 'ringing' || outcome == 'answered') {
-          print('📞 New call. Opening UI with lead ID: ${lead.id}');
-          _openLeadUI(lead);
+      // Decide whether to open UI: ringing, answered, outgoing_start -> open
+      if (outcome == 'ringing' || outcome == 'answered' || outcome == 'outgoing_start') {
+        print('📞 New call. Opening UI with lead ID: ${lead.id}');
+        _openLeadUI(lead);
       }
     } catch (e) {
-      print("❌ Error handling call start: $e");
+      print("❌ Error handling call start for $phoneNumber: $e");
+      // Ensure we don't leave the active marker forever if error occurs
+      if (_activeCalls.contains(phoneNumber)) {
+        _activeCalls.remove(phoneNumber);
+      }
     }
   }
 
@@ -152,28 +199,30 @@ class CallEventHandler {
     required String direction,
     required String outcome,
     required DateTime timestamp,
-    int? durationInSeconds, 
+    int? durationInSeconds,
   }) async {
     try {
-      // 🔥 Use a dedicated method for final events to log the event and handle the review flag
       final Lead? updatedLead = await _leadService.addFinalCallEvent(
         phone: phoneNumber,
         direction: direction,
         outcome: outcome,
         timestamp: timestamp,
-        durationInSeconds: durationInSeconds, 
+        durationInSeconds: durationInSeconds,
       );
-      
-      if (updatedLead == null) return;
-      
-      // 🎯 CRITICAL FIX: If the service set needsManualReview (missed/rejected call), open the UI.
-      if (updatedLead.needsManualReview) {
-          print('📞 Final event $outcome requires review. Opening UI.');
-          _openLeadUI(updatedLead);
+
+      if (updatedLead == null) {
+        print("! No lead returned for final event $outcome on $phoneNumber");
+        return;
       }
-      
+
+      // Open UI for terminal events to allow notes/followup
+      print('📞 Final event $outcome finished for $phoneNumber. Opening UI for follow-up.');
+      _openLeadUI(updatedLead);
     } catch (e) {
-      print("❌ Error handling call update: $e");
+      print("❌ Error handling call update for $phoneNumber: $e");
+    } finally {
+      // ensure cleanup of active marker
+      _activeCalls.remove(phoneNumber);
     }
   }
 
@@ -188,8 +237,14 @@ class CallEventHandler {
 
     final ctx = navigatorKey.currentState?.overlay?.context;
     if (ctx == null) {
-      print("❌ NO CONTEXT — delaying open");
-      Future.delayed(const Duration(milliseconds: 300), () {
+      print("❌ NO CONTEXT — delaying open. (Is the app fully initialized?)");
+      // One retry after 500ms
+      Future.delayed(const Duration(milliseconds: 500), () {
+        final retryCtx = navigatorKey.currentState?.overlay?.context;
+        if (retryCtx == null) {
+          print("❌ STILL NO CONTEXT — aborting open.");
+          return;
+        }
         _openLeadUI(lead);
       });
       return;
@@ -198,17 +253,19 @@ class CallEventHandler {
     _screenOpen = true;
     print("📞 OPENING UI FOR ${lead.phoneNumber}");
 
-    navigatorKey.currentState!.push(
+    navigatorKey.currentState!
+        .push(
       MaterialPageRoute(
         settings: const RouteSettings(name: '/lead-form'),
         fullscreenDialog: true,
         builder: (_) => LeadFormScreen(
           lead: lead,
-          autoOpenedFromCall: true, // Crucial flag for LeadFormScreen.dispose() logic
+          autoOpenedFromCall: true,
         ),
       ),
-    ).then((_) {
-      // Allow reopen after user closes screen
+    )
+        .then((_) {
+      // allow reopen after user closes screen
       Future.delayed(const Duration(milliseconds: 250), () {
         _screenOpen = false;
       });

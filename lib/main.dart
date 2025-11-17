@@ -43,7 +43,8 @@ class _MyAppState extends State<MyApp> {
       // ---------------------------
       // 1. PERMISSIONS
       // ---------------------------
-      final granted = await _permissions.requestPhonePermissions();
+      // NOTE: PermissionsService.requestPermissions returns a bool (phone permission granted)
+      final granted = await PermissionsService.requestPermissions(context: navigatorKey.currentContext);
 
       // ---------------------------
       // 2. CALL HANDLER
@@ -63,14 +64,25 @@ class _MyAppState extends State<MyApp> {
       }
 
       // ---------------------------
-      // 3. LISTEN FOR CALLS
+      // 3. Request Dialer Role (optional but recommended)
+      // ---------------------------
+      // Attempt to request ROLE_DIALER — this will show the system dialog on Android Q+
+      try {
+        await PermissionsService.requestDialerRole();
+        print("🔧 [MAIN] Requested dialer role.");
+      } catch (e) {
+        print("❌ [MAIN] Error requesting dialer role: $e");
+      }
+
+      // ---------------------------
+      // 4. LISTEN FOR CALLS
       // ---------------------------
       _callEventHandler.startListening();
 
       setState(() => _initDone = true);
       print("✅ [MAIN] Initialization complete.");
-    } catch (e) {
-      print("❌ [MAIN] init error: $e");
+    } catch (e, st) {
+      print("❌ [MAIN] init error: $e\n$st");
       // Still set initDone to true to show the main screen
       setState(() => _initDone = true);
     }
@@ -93,7 +105,8 @@ class _MyAppState extends State<MyApp> {
             TextButton(
               onPressed: () async {
                 Navigator.of(context).pop();
-                await _permissions.openSettings();
+                // call the PermissionsService helper to open app settings
+                await PermissionsService.openAppSettingsScreen();
               },
               child: const Text('Open Settings'),
             ),
