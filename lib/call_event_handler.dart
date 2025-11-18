@@ -1,4 +1,6 @@
 // lib/call_event_handler.dart
+// Patched: dedupe intermediate saves, consolidate session events on finalize,
+// accept late authoritative duration updates and update final record only once.
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -21,15 +23,18 @@ class CallEventHandler {
   /// Prevents multiple screens from opening
   bool _screenOpen = false;
 
-  /// State tracker for call deduplication: maps phoneNumber -> lastTimestampMs processed
-  final Map<String, int> _lastProcessedTimestampMs = {};
+  /// State tracker for call deduplication (simple single-call guard)
+  String? _currentlyProcessingCall;
 
-  /// Optional flag to mark a call being actively processed (phone -> bool)
-  final Set<String> _activeCalls = {};
+  /// In-memory session buffer keyed by phone (or '__no_number__' when unknown).
+  final Map<String, _CallSessionBuffer> _sessions = {};
 
-  /// A short dedup window (ms) to ignore near-duplicate initial events
-  /// (2000 ms = 2 seconds)
-  static const int _dedupWindowMs = 2000;
+  /// Deduplication window (ms) - ignore identical events within this timeframe
+  static const int _dedupeWindowMs = 800;
+
+  /// Auto-finalize timeout (ms) - if no terminal event arrives, finalize session
+  /// after this many milliseconds.
+  static const int _autoFinalizeMs = 8000;
 
   CallEventHandler({required this.navigatorKey});
 
@@ -39,15 +44,12 @@ class CallEventHandler {
   void startListening() {
     print("📞 [CALL HANDLER] START LISTENING");
 
-    _subscription = _eventChannel.receiveBroadcastStream().listen(
+    _subscription = _eventChannel
+        .receiveBroadcastStream()
+        .listen(
       (event) {
-        try {
-          final Map<String, dynamic> typedEvent =
-              Map<String, dynamic>.from(event as Map);
-          _processCallEvent(typedEvent);
-        } catch (e) {
-          print("❌ Error parsing incoming event: $e — raw event: $event");
-        }
+        final Map<String, dynamic> typedEvent = Map<String, dynamic>.from(event as Map);
+        _processCallEvent(typedEvent);
       },
       onError: (error) {
         print("❌ STREAM ERROR: $error");
@@ -66,163 +68,356 @@ class CallEventHandler {
 
   void dispose() {
     stopListening();
+    for (final s in _sessions.values) s.dispose();
+    _sessions.clear();
   }
 
   // --------------------------------------------------------------------------
   // EVENT PROCESSOR
   // --------------------------------------------------------------------------
   void _processCallEvent(Map<String, dynamic> event) {
-    // Improved logging
-    print('📞 RAW EVENT RECEIVED → $event');
+    try {
+      print('📞 RAW EVENT → $event');
 
-    final phoneNumber = (event['phoneNumber'] as String?)?.trim();
-    final outcome = (event['outcome'] as String?)?.trim();
-    final direction = (event['direction'] as String?)?.trim();
+      final phoneNumber = (event['phoneNumber'] as String?)?.trim();
+      final outcome = (event['outcome'] as String?)?.trim();
+      final direction = (event['direction'] as String?)?.trim();
 
-    final timestampMs =
-        (event['timestamp'] is int) ? event['timestamp'] as int : null;
-    final duration = (event['durationInSeconds'] is int)
-        ? event['durationInSeconds'] as int
-        : null;
+      // timestamp and duration may be provided by native call-log fallback
+      final timestampMs = event['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch;
+      final duration = event['durationInSeconds'] as int?;
 
-    final int eventTimestamp =
-        timestampMs ?? DateTime.now().millisecondsSinceEpoch;
-
-    if (phoneNumber == null ||
-        phoneNumber.isEmpty ||
-        outcome == null ||
-        direction == null) {
-      print("! Ignoring invalid or incomplete call event.");
-      return;
-    }
-
-    // Deduplication: ignore repeated initial events within _dedupWindowMs
-    final lastTs = _lastProcessedTimestampMs[phoneNumber];
-    if (lastTs != null &&
-        (eventTimestamp - lastTs).abs() < _dedupWindowMs &&
-        _isInitialEvent(outcome)) {
-      print(
-          "! DEDUPLICATED: Ignoring quick duplicate event for $phoneNumber ($outcome). Δ=${(eventTimestamp - lastTs).abs()}ms");
-      return;
-    }
-
-    // Update last-processed timestamp for this phone number for any event
-    _lastProcessedTimestampMs[phoneNumber] = eventTimestamp;
-
-    // Terminal events: ended/missed/rejected
-    if (_isTerminalEvent(outcome)) {
-      // Clear active marker for this call (if present)
-      if (_activeCalls.contains(phoneNumber)) {
-        _activeCalls.remove(phoneNumber);
-      }
-
-      _handleCallUpdate(
-        phoneNumber: phoneNumber,
-        direction: direction,
-        outcome: outcome,
-        durationInSeconds: duration,
-        timestamp: DateTime.fromMillisecondsSinceEpoch(eventTimestamp),
-      );
-      return;
-    }
-
-    // Initial / UI-trigger events: ringing, outgoing_start, answered
-    if (_isInitialEvent(outcome)) {
-      // If screen already open for another call, don't open again — but still record events
-      if (_activeCalls.contains(phoneNumber)) {
-        // We already processed a start for this call; skip UI logic but still log/state.
-        print("! Already processing call for $phoneNumber — skipping repeated start event.");
+      if (outcome == null || direction == null) {
+        print("! Ignoring invalid call event (missing outcome/direction).");
         return;
       }
 
-      // Mark as active to prevent duplicates opening UI
-      _activeCalls.add(phoneNumber);
+      // use synthetic key when number is unknown
+      final key = (phoneNumber == null || phoneNumber.isEmpty) ? '__no_number__' : phoneNumber;
 
-      _handleCallStarted(
-        phoneNumber: phoneNumber,
+      // create session buffer if missing (pass auto finalize timeout)
+      final buf = _sessions.putIfAbsent(key, () => _CallSessionBuffer(key, autoFinalizeMs: _autoFinalizeMs));
+
+      // Deduplicate same-outcome too quickly
+      if (buf.lastEventType == outcome && (timestampMs - (buf.lastEventTs ?? 0)).abs() < _dedupeWindowMs) {
+        print("! DEDUPLICATED: Skipping duplicate event for $key ($outcome).");
+        // If authoritative duration arrives with duplicate, update last event duration
+        if (duration != null) {
+          buf.updateLastEventWithDuration(duration, timestampMs);
+          // If we previously finalized and now got duration, perform an authoritative update
+          if (buf.finalized && !buf.reportedAuthoritativeUpdate) {
+            buf.reportedAuthoritativeUpdate = true;
+            _applyAuthoritativeUpdate(key, phoneNumber, duration, timestampMs);
+          }
+        }
+        // If synthetic -> real phone migration
+        if (key == '__no_number__' && phoneNumber != null && phoneNumber.isNotEmpty) {
+          _migrateSessionKey('__no_number__', phoneNumber);
+        }
+        return;
+      }
+
+      // Record event in buffer
+      buf.addEvent(_CallEvent(
+        type: outcome,
+        timestampMs: timestampMs,
+        durationSeconds: duration,
         direction: direction,
-        outcome: outcome,
-        timestamp: DateTime.fromMillisecondsSinceEpoch(eventTimestamp),
+        phoneNumber: phoneNumber,
+      ));
+
+      // If synthetic key and now have real number, migrate buffer
+      if (key == '__no_number__' && phoneNumber != null && phoneNumber.isNotEmpty) {
+        _migrateSessionKey('__no_number__', phoneNumber);
+      }
+
+      // If this event carries authoritative duration -> finalize now using duration
+      if (duration != null) {
+        print('ℹ️ Received authoritative duration for $key: $duration sec — finalizing using call-log data.');
+        // If already finalized earlier, treat as authoritative update
+        if (buf.finalized) {
+          if (!buf.reportedAuthoritativeUpdate) {
+            buf.reportedAuthoritativeUpdate = true;
+            _applyAuthoritativeUpdate(key, phoneNumber, duration, timestampMs);
+          }
+        } else {
+          _finalizeSessionWithDuration(key, phoneNumber, duration, timestampMs);
+        }
+        return;
+      }
+
+      // Intermediate vs terminal
+      if (_isIntermediate(outcome)) {
+        _handleIntermediateEvent(buf, phoneNumber, direction!, outcome, timestampMs, duration);
+      } else if (_isTerminal(outcome)) {
+        _handleTerminalEvent(buf, phoneNumber, direction!, outcome, timestampMs, duration);
+      } else {
+        _handleIntermediateEvent(buf, phoneNumber, direction!, outcome, timestampMs, duration);
+      }
+    } catch (e, st) {
+      print("❌ _processCallEvent error: $e\n$st");
+    }
+  }
+
+  bool _isIntermediate(String outcome) {
+    final o = outcome.toLowerCase();
+    return o == 'ringing' || o == 'started' || o == 'outgoing_start' || o == 'answered';
+  }
+
+  bool _isTerminal(String outcome) {
+    final o = outcome.toLowerCase();
+    return o == 'ended' || o == 'missed' || o == 'rejected';
+  }
+
+  // --------------------------------------------------------------------------
+  // INTERMEDIATE EVENT HANDLING (ringing/started/answered/outgoing_start)
+  // --------------------------------------------------------------------------
+  void _handleIntermediateEvent(
+    _CallSessionBuffer buf,
+    String? phoneNumber,
+    String direction,
+    String outcome,
+    int timestampMs,
+    int? duration,
+  ) async {
+    try {
+      final DateTime timestamp = DateTime.fromMillisecondsSinceEpoch(timestampMs);
+
+      // Avoid re-saving same intermediate outcome many times:
+      if (buf.lastSavedOutcome == outcome && (timestampMs - (buf.lastSavedTs ?? 0)).abs() < _dedupeWindowMs) {
+        print("! Skipping saving duplicate intermediate outcome '$outcome' for ${buf.key}.");
+      } else {
+        // call LeadService.addCallEvent to append/update lead
+        final Lead lead = await _leadService.addCallEvent(
+          phone: phoneNumber ?? '',
+          direction: direction,
+          outcome: outcome,
+          timestamp: timestamp,
+          durationInSeconds: duration,
+        );
+
+        // mark last saved to avoid duplicates
+        buf.lastSavedOutcome = outcome;
+        buf.lastSavedTs = timestampMs;
+
+        // If intermediate event should open UI
+        if (outcome == 'ringing' || outcome == 'answered') {
+          if (_currentlyProcessingCall != phoneNumber) {
+            _currentlyProcessingCall = phoneNumber;
+            print('📞 New call. Opening UI with lead ID: ${lead.id}');
+            _openLeadUI(lead);
+          } else {
+            print('! SCREEN OPEN DEDUP prevented for $phoneNumber');
+          }
+        }
+      }
+
+      // reset or set auto-finalize timer on any intermediate event
+      buf.scheduleAutoFinalize(() {
+        print('⌛ Auto-finalize triggered for session ${buf.key} (no terminal event).');
+        _autoFinalizeSession(buf.key);
+      });
+    } catch (e) {
+      print("❌ Error handling intermediate event: $e");
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // TERMINAL EVENT HANDLING (ended/missed/rejected)
+  // --------------------------------------------------------------------------
+  void _handleTerminalEvent(
+    _CallSessionBuffer buf,
+    String? phoneNumber,
+    String direction,
+    String outcome,
+    int timestampMs,
+    int? duration,
+  ) async {
+    try {
+      final DateTime timestamp = DateTime.fromMillisecondsSinceEpoch(timestampMs);
+      final String phoneToUse = (phoneNumber != null && phoneNumber.isNotEmpty) ? phoneNumber : '';
+
+      // Build consolidated list and call addFinalCallEvent once
+      await _commitFinalFromBuffer(buf, phoneToUse, outcome, timestampMs, duration);
+
+      // Clear currently processing marker if matches
+      if (_currentlyProcessingCall == phoneNumber) _currentlyProcessingCall = null;
+
+      // finalize buffer and cleanup shortly
+      buf.markFinalized();
+      buf.cancelAutoFinalize();
+      Future.delayed(const Duration(milliseconds: 600), () {
+        _sessions.remove(buf.key)?.dispose();
+      });
+    } catch (e) {
+      print("❌ Error handling terminal event: $e");
+    }
+  }
+
+  // ------------------------------------------------------------
+  // FINALIZATION helpers: create consolidated events and save once
+  // ------------------------------------------------------------
+  Future<void> _commitFinalFromBuffer(_CallSessionBuffer buf, String phone, String finalOutcome, int timestampMs, int? durationFromEvent) async {
+    try {
+      // Consolidate events: sort by timestamp, merge duplicates, prefer events with duration
+      final consolidated = _consolidateEvents(buf.events);
+
+      // Choose best timestamp/duration for final save:
+      // - prefer an event that contains duration (authoritative)
+      // - otherwise use the latest event timestamp
+      int? chosenDuration;
+      int chosenTimestamp = timestampMs;
+      for (final e in consolidated.reversed) {
+        if (e.durationSeconds != null) {
+          chosenDuration = e.durationSeconds;
+          chosenTimestamp = e.timestampMs;
+          break;
+        }
+      }
+      if (chosenDuration == null && consolidated.isNotEmpty) {
+        chosenTimestamp = consolidated.last.timestampMs;
+      }
+
+      // If we have an explicit durationFromEvent, prefer it
+      if (durationFromEvent != null) {
+        chosenDuration = durationFromEvent;
+        chosenTimestamp = timestampMs;
+      }
+
+      final DateTime finalTs = DateTime.fromMillisecondsSinceEpoch(chosenTimestamp);
+
+      // Call leadService.addFinalCallEvent ONCE with chosen data
+      final Lead? updatedLead = await _leadService.addFinalCallEvent(
+        phone: phone,
+        direction: consolidated.isNotEmpty ? consolidated.last.direction ?? 'unknown' : 'unknown',
+        outcome: finalOutcome,
+        timestamp: finalTs,
+        durationInSeconds: chosenDuration,
       );
 
+      print('✅ Finalized call for $phone outcome=$finalOutcome dur=$chosenDuration ts=$chosenTimestamp savedLead=${updatedLead?.id}');
+
+      // If updatedLead requires manual review, open UI
+      if (updatedLead != null && updatedLead.needsManualReview) {
+        _openLeadUI(updatedLead);
+      }
+    } catch (e, st) {
+      print('❌ _commitFinalFromBuffer error: $e\n$st');
+    }
+  }
+
+  // When authoritative duration arrives *after* we already finalized (rare), update final record.
+  Future<void> _applyAuthoritativeUpdate(String key, String? phoneNumber, int durationSec, int timestampMs) async {
+    try {
+      final buf = _sessions[key];
+      final phone = (phoneNumber != null && phoneNumber.isNotEmpty) ? phoneNumber : (buf?.key == '__no_number__' ? '' : buf?.key ?? '');
+
+      final DateTime ts = DateTime.fromMillisecondsSinceEpoch(timestampMs);
+
+      final Lead? updatedLead = await _leadService.addFinalCallEvent(
+        phone: phone,
+        direction: buf != null && buf.events.isNotEmpty ? buf.events.last.direction : 'unknown',
+        outcome: 'ended',
+        timestamp: ts,
+        durationInSeconds: durationSec,
+      );
+
+      print('✅ Applied authoritative update for $phone dur=$durationSec updatedLead=${updatedLead?.id}');
+
+      if (updatedLead != null && updatedLead.needsManualReview) _openLeadUI(updatedLead);
+    } catch (e, st) {
+      print('❌ _applyAuthoritativeUpdate error: $e\n$st');
+    }
+  }
+
+  // consolidate buffer events: sort by ts, dedupe consecutive duplicates, prefer duration where present
+  List<_CallEvent> _consolidateEvents(List<_CallEvent> events) {
+    if (events.isEmpty) return [];
+
+    final copy = List<_CallEvent>.from(events);
+    copy.sort((a, b) => a.timestampMs.compareTo(b.timestampMs));
+
+    final List<_CallEvent> out = [];
+    for (final e in copy) {
+      if (out.isEmpty) {
+        out.add(_cloneEvent(e));
+        continue;
+      }
+      final last = out.last;
+      // if same type and timestamp extremely close, keep the one that has duration or later timestamp
+      if (last.type == e.type) {
+        if (last.durationSeconds == null && e.durationSeconds != null) {
+          out[out.length - 1] = _cloneEvent(e);
+        } else if (e.timestampMs > last.timestampMs + 50) {
+          // slightly different → append
+          out.add(_cloneEvent(e));
+        } else {
+          // otherwise ignore duplicate near-duplicate
+        }
+      } else {
+        out.add(_cloneEvent(e));
+      }
+    }
+    return out;
+  }
+
+  _CallEvent _cloneEvent(_CallEvent e) {
+    return _CallEvent(
+      type: e.type,
+      timestampMs: e.timestampMs,
+      durationSeconds: e.durationSeconds,
+      direction: e.direction,
+      phoneNumber: e.phoneNumber,
+    );
+  }
+
+  // finalize when authoritative duration arrives
+  void _finalizeSessionWithDuration(String key, String? phoneNumber, int durationSec, int timestampMs) {
+    final buf = _sessions[key];
+    if (buf == null) {
+      print('! No buffer found for finalizeWithDuration: $key');
       return;
     }
-
-    // If we reach here, the event is unknown; log it
-    print("! Unhandled event outcome: $outcome for $phoneNumber");
+    // commit using the buffer's consolidated events
+    _commitFinalFromBuffer(buf, (phoneNumber != null && phoneNumber.isNotEmpty) ? phoneNumber : (key == '__no_number__' ? '' : key), 'ended', timestampMs, durationSec);
+    // mark finalized & cleanup
+    buf.markFinalized();
+    buf.cancelAutoFinalize();
+    Future.delayed(const Duration(milliseconds: 400), () {
+      _sessions.remove(key)?.dispose();
+    });
   }
 
-  bool _isInitialEvent(String outcome) {
-    return outcome == 'ringing' ||
-        outcome == 'outgoing_start' ||
-        outcome == 'answered';
-  }
+  // Called when auto-finalize timer fires (no terminal event)
+  void _autoFinalizeSession(String key) async {
+    final buf = _sessions[key];
+    if (buf == null) return;
 
-  bool _isTerminalEvent(String outcome) {
-    return outcome == 'ended' || outcome == 'missed' || outcome == 'rejected';
-  }
+    final consolidated = _consolidateEvents(buf.events);
+    final last = consolidated.isNotEmpty ? consolidated.last : null;
+    final phone = (last?.phoneNumber != null && last!.phoneNumber!.isNotEmpty) ? last.phoneNumber! : (key == '__no_number__' ? '' : key);
 
-  // --------------------------------------------------------------------------
-  // HANDLERS
-  // --------------------------------------------------------------------------
-  void _handleCallStarted({
-    required String phoneNumber,
-    required String direction,
-    required String outcome,
-    required DateTime timestamp,
-  }) async {
-    try {
-      final Lead lead = await _leadService.addCallEvent(
-        phone: phoneNumber,
-        direction: direction,
-        outcome: outcome,
-        timestamp: timestamp,
-        durationInSeconds: null,
-      );
+    final DateTime ts = DateTime.fromMillisecondsSinceEpoch(last?.timestampMs ?? DateTime.now().millisecondsSinceEpoch);
+    final String direction = last?.direction ?? 'unknown';
+    final String outcome = last?.type ?? 'ended';
+    final int? duration = consolidated.reversed.firstWhere((e) => e.durationSeconds != null, orElse: () => _CallEvent.empty()).durationSeconds;
 
-      // Decide whether to open UI: ringing, answered, outgoing_start -> open
-      if (outcome == 'ringing' || outcome == 'answered' || outcome == 'outgoing_start') {
-        print('📞 New call. Opening UI with lead ID: ${lead.id}');
-        _openLeadUI(lead);
-      }
-    } catch (e) {
-      print("❌ Error handling call start for $phoneNumber: $e");
-      // Ensure we don't leave the active marker forever if error occurs
-      if (_activeCalls.contains(phoneNumber)) {
-        _activeCalls.remove(phoneNumber);
-      }
-    }
-  }
-
-  void _handleCallUpdate({
-    required String phoneNumber,
-    required String direction,
-    required String outcome,
-    required DateTime timestamp,
-    int? durationInSeconds,
-  }) async {
     try {
       final Lead? updatedLead = await _leadService.addFinalCallEvent(
-        phone: phoneNumber,
+        phone: phone,
         direction: direction,
-        outcome: outcome,
-        timestamp: timestamp,
-        durationInSeconds: durationInSeconds,
+        outcome: outcome == 'ended' ? 'ended' : outcome,
+        timestamp: ts,
+        durationInSeconds: duration,
       );
 
-      if (updatedLead == null) {
-        print("! No lead returned for final event $outcome on $phoneNumber");
-        return;
+      if (updatedLead != null && updatedLead.needsManualReview) {
+        _openLeadUI(updatedLead);
       }
-
-      // Open UI for terminal events to allow notes/followup
-      print('📞 Final event $outcome finished for $phoneNumber. Opening UI for follow-up.');
-      _openLeadUI(updatedLead);
     } catch (e) {
-      print("❌ Error handling call update for $phoneNumber: $e");
+      print('❌ Error auto-finalizing session $key: $e');
     } finally {
-      // ensure cleanup of active marker
-      _activeCalls.remove(phoneNumber);
+      _sessions.remove(key)?.dispose();
     }
   }
 
@@ -237,14 +432,8 @@ class CallEventHandler {
 
     final ctx = navigatorKey.currentState?.overlay?.context;
     if (ctx == null) {
-      print("❌ NO CONTEXT — delaying open. (Is the app fully initialized?)");
-      // One retry after 500ms
-      Future.delayed(const Duration(milliseconds: 500), () {
-        final retryCtx = navigatorKey.currentState?.overlay?.context;
-        if (retryCtx == null) {
-          print("❌ STILL NO CONTEXT — aborting open.");
-          return;
-        }
+      print("❌ NO CONTEXT — delaying open");
+      Future.delayed(const Duration(milliseconds: 300), () {
         _openLeadUI(lead);
       });
       return;
@@ -253,8 +442,7 @@ class CallEventHandler {
     _screenOpen = true;
     print("📞 OPENING UI FOR ${lead.phoneNumber}");
 
-    navigatorKey.currentState!
-        .push(
+    navigatorKey.currentState!.push(
       MaterialPageRoute(
         settings: const RouteSettings(name: '/lead-form'),
         fullscreenDialog: true,
@@ -263,12 +451,119 @@ class CallEventHandler {
           autoOpenedFromCall: true,
         ),
       ),
-    )
-        .then((_) {
-      // allow reopen after user closes screen
+    ).then((_) {
       Future.delayed(const Duration(milliseconds: 250), () {
         _screenOpen = false;
       });
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // HELPERS
+  // ---------------------------------------------------------------------------
+  void _migrateSessionKey(String oldKey, String newKey) {
+    if (!_sessions.containsKey(oldKey)) return;
+    final old = _sessions.remove(oldKey)!;
+    final target = _sessions.putIfAbsent(newKey, () => _CallSessionBuffer(newKey, autoFinalizeMs: _autoFinalizeMs));
+    target.absorb(old);
+    old.dispose();
+    print('ℹ️ Migrated session buffer $oldKey → $newKey');
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Internal session buffer & event types
+// ---------------------------------------------------------------------------
+
+class _CallSessionBuffer {
+  final String key; // phone number or '__no_number__'
+  final List<_CallEvent> events = [];
+  int? lastEventTs;
+  String? lastEventType;
+  bool finalized = false;
+  bool reportedAuthoritativeUpdate = false; // ensure we only apply authoritative update once
+  Timer? _expirationTimer;
+  Timer? _autoFinalizeTimer;
+  final int autoFinalizeMs;
+
+  // last saved intermediate outcome (to avoid re-saving same outcome repeatedly)
+  String? lastSavedOutcome;
+  int? lastSavedTs;
+
+  _CallSessionBuffer(this.key, {this.autoFinalizeMs = 8000});
+
+  void addEvent(_CallEvent e) {
+    if (events.isNotEmpty) {
+      final last = events.last;
+      // avoid exact duplicate events in a row
+      if (last.type == e.type && last.timestampMs == e.timestampMs && last.durationSeconds == e.durationSeconds) {
+        return;
+      }
+    }
+    events.add(e);
+    lastEventTs = e.timestampMs;
+    lastEventType = e.type;
+
+    // reset a general expiration timer (cleanup stale sessions)
+    _expirationTimer?.cancel();
+    _expirationTimer = Timer(const Duration(seconds: 60), () {
+      dispose();
+    });
+  }
+
+  void updateLastEventWithDuration(int duration, int timestampMs) {
+    if (events.isEmpty) return;
+    final last = events.last;
+    last.durationSeconds = duration;
+    last.timestampMs = timestampMs;
+    lastEventTs = timestampMs;
+  }
+
+  void markFinalized() {
+    finalized = true;
+    cancelAutoFinalize();
+  }
+
+  void absorb(_CallSessionBuffer other) {
+    for (final e in other.events) addEvent(e);
+  }
+
+  void dispose() {
+    _expirationTimer?.cancel();
+    _autoFinalizeTimer?.cancel();
+    _expirationTimer = null;
+    _autoFinalizeTimer = null;
+  }
+
+  void scheduleAutoFinalize(void Function() callback) {
+    _autoFinalizeTimer?.cancel();
+    if (callback == null) return;
+    _autoFinalizeTimer = Timer(Duration(milliseconds: autoFinalizeMs), () {
+      callback();
+    });
+  }
+
+  void cancelAutoFinalize() {
+    _autoFinalizeTimer?.cancel();
+    _autoFinalizeTimer = null;
+  }
+}
+
+class _CallEvent {
+  final String type;
+  int timestampMs;
+  int? durationSeconds;
+  final String direction;
+  final String? phoneNumber;
+
+  _CallEvent({
+    required this.type,
+    required this.timestampMs,
+    required this.direction,
+    this.durationSeconds,
+    this.phoneNumber,
+  });
+
+  static _CallEvent empty() => _CallEvent(type: 'empty', timestampMs: 0, direction: 'unknown');
+}
+  
