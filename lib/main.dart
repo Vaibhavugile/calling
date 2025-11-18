@@ -14,7 +14,6 @@ void main() async {
 
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
-
   @override
   State<MyApp> createState() => _MyAppState();
 }
@@ -22,98 +21,25 @@ class MyApp extends StatefulWidget {
 class _MyAppState extends State<MyApp> {
   final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
   late CallEventHandler _callEventHandler;
-  final PermissionsService _permissions = PermissionsService();
-
   bool _initDone = false;
 
   @override
   void initState() {
     super.initState();
-
-    // 🔥 Correct way: run initialization AFTER MaterialApp builds
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      Future.microtask(() => _initializeApp());
-    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initializeApp());
   }
 
   Future<void> _initializeApp() async {
-    print("🔧 [MAIN] Starting initialization...");
-
     try {
-      // ---------------------------
-      // 1. PERMISSIONS
-      // ---------------------------
-      // NOTE: PermissionsService.requestPermissions returns a bool (phone permission granted)
-      final granted = await PermissionsService.requestPermissions(context: navigatorKey.currentContext);
-
-      // ---------------------------
-      // 2. CALL HANDLER
-      // ---------------------------
+      await PermissionsService.requestPermissions(context: navigatorKey.currentContext);
       _callEventHandler = CallEventHandler(navigatorKey: navigatorKey);
-
-      if (!granted) {
-        // 🔥 FIX: Delay the showDialog call to ensure MaterialLocalizations is available
-        if (mounted) {
-          await Future.delayed(Duration.zero);
-          if (navigatorKey.currentContext != null) {
-            _showPermissionDeniedDialog(navigatorKey.currentContext!);
-          } else {
-            print("❌ [MAIN] Cannot show permission dialog: Navigator Context null.");
-          }
-        }
-      }
-
-      // ---------------------------
-      // 3. Request Dialer Role (optional but recommended)
-      // ---------------------------
-      // Attempt to request ROLE_DIALER — this will show the system dialog on Android Q+
-      try {
-        await PermissionsService.requestDialerRole();
-        print("🔧 [MAIN] Requested dialer role.");
-      } catch (e) {
-        print("❌ [MAIN] Error requesting dialer role: $e");
-      }
-
-      // ---------------------------
-      // 4. LISTEN FOR CALLS
-      // ---------------------------
+      await PermissionsService.requestDialerRole();
       _callEventHandler.startListening();
-
-      setState(() => _initDone = true);
-      print("✅ [MAIN] Initialization complete.");
-    } catch (e, st) {
-      print("❌ [MAIN] init error: $e\n$st");
-      // Still set initDone to true to show the main screen
+    } catch (e) {
+      print("Init error: $e");
+    } finally {
       setState(() => _initDone = true);
     }
-  }
-
-  void _showPermissionDeniedDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Permissions Required'),
-          content: const Text(
-            'Call and Phone State permissions are required for call tracking. Please enable them in App Settings for full functionality.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Continue'),
-            ),
-            TextButton(
-              onPressed: () async {
-                Navigator.of(context).pop();
-                // call the PermissionsService helper to open app settings
-                await PermissionsService.openAppSettingsScreen();
-              },
-              child: const Text('Open Settings'),
-            ),
-          ],
-        );
-      },
-    );
   }
 
   @override
@@ -126,33 +52,11 @@ class _MyAppState extends State<MyApp> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_initDone) {
-      return MaterialApp(
-        title: 'Call Leads',
-        home: const Scaffold(
-          body: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 12),
-                Text('Initializing...'),
-              ],
-            ),
-          ),
-        ),
-        debugShowCheckedModeBanner: false,
-      );
-    }
-
     return MaterialApp(
       navigatorKey: navigatorKey,
       title: 'Call Leads',
-      theme: ThemeData(
-        primarySwatch: Colors.indigo,
-        useMaterial3: true,
-      ),
-      home: const LeadListScreen(),
+      theme: ThemeData(primarySwatch: Colors.indigo, useMaterial3: true),
+      home: _initDone ? const LeadListScreen() : const Scaffold(body: Center(child: CircularProgressIndicator())),
       debugShowCheckedModeBanner: false,
     );
   }

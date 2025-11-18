@@ -1,3 +1,4 @@
+// MyInCallService.kt
 package com.example.call_leads_app.callservice
 
 import android.telecom.Call
@@ -12,7 +13,7 @@ class MyInCallService : InCallService() {
         override fun onStateChanged(call: Call, state: Int) {
             super.onStateChanged(call, state)
             Log.d(TAG, "onStateChanged: state=$state handle=${call.details?.handle}")
-            // Forward events to your CallService or use a MethodChannel if needed
+            // Optionally forward relevant events to CallService or a MethodChannel
         }
 
         override fun onDetailsChanged(call: Call, details: Call.Details?) {
@@ -24,7 +25,11 @@ class MyInCallService : InCallService() {
     override fun onCallAdded(call: Call) {
         super.onCallAdded(call)
         Log.d(TAG, "onCallAdded: ${call.details?.handle}")
-        call.registerCallback(callCallback)
+        try {
+            call.registerCallback(callCallback)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error registering call callback: ${e.localizedMessage}", e)
+        }
     }
 
     override fun onCallRemoved(call: Call) {
@@ -33,7 +38,7 @@ class MyInCallService : InCallService() {
         try {
             call.unregisterCallback(callCallback)
         } catch (ignored: Exception) {
-            // defensive: ignore if callback was not registered or already unregistered
+            // defensive: ignore
         }
     }
 }

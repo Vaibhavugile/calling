@@ -1,3 +1,4 @@
+// CallService.kt
 package com.example.call_leads_app.callservice
 
 import android.app.Notification
@@ -16,14 +17,21 @@ import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.EventChannel
 import kotlin.math.abs
 
 class CallService : Service() {
 
     companion object {
+        @Volatile
         var eventSink: EventChannel.EventSink? = null
+
+        // Buffered pending event (arrived before Flutter attached)
+        @Volatile
         var pendingInitialEvent: Map<String, Any?>? = null
+
+        private const val TAG = "CallService"
 
         private const val CALL_COOLDOWN_MS = 2000L
         private const val CALL_LOG_DELAY_MS = 800L
@@ -36,56 +44,83 @@ class CallService : Service() {
         private const val KEY_LAST_OUTGOING_TS = "last_outgoing_ts"
 
         private const val FINAL_LOCK_TTL_MS = 15_000L
+
+        private const val NOTIF_CHANNEL_ID = "call_channel"
+        private const val NOTIF_CHANNEL_NAME = "Call Tracking"
+
+        /**
+         * Static helper: flush any buffered pendingInitialEvent into the current eventSink if available.
+         * This helper is safe to call multiple times (idempotent) and handles exceptions internally.
+         */
+        fun flushPendingToSink() {
+            try {
+                val pending = pendingInitialEvent
+                val sink = eventSink
+                if (pending != null && sink != null) {
+                    Log.d(TAG, "Flushing pending event to Flutter (static helper): $pending")
+                    try {
+                        // Post to main thread to be safe
+                        Handler(Looper.getMainLooper()).post {
+                            try {
+                                eventSink?.success(pending)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error while flushing pending event to sink: ${e.localizedMessage}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error posting flush to main handler: ${e.localizedMessage}")
+                    } finally {
+                        // Clear regardless to avoid double-send attempts
+                        pendingInitialEvent = null
+                    }
+                } else {
+                    Log.d(TAG, "No pending event to flush or sink not set (pending=$pending, sinkSet=${sink != null})")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "flushPendingToSink error: ${e.localizedMessage}", e)
+            }
+        }
     }
 
     private lateinit var telephonyManager: TelephonyManager
     private val mainHandler = Handler(Looper.getMainLooper())
-
     private var currentCallNumber: String? = null
     private var currentCallDirection: String? = null
     private var previousCallState: Int = TelephonyManager.CALL_STATE_IDLE
     private var lastCallEndTime: Long = 0
-
     private var legacyListener: CallStateListener? = null
     private var modernCallback: TelephonyCallback? = null
 
     override fun onCreate() {
         super.onCreate()
-        createChannel()
+        createNotificationChannelIfNeeded()
         startForeground(1, buildNotification())
         telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
         registerTelephonyCallback()
-        Log.d("CallService", "✅ Service created and listening.")
+        Log.d(TAG, "✅ Service created and listening.")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d("CallService", "➡️ Service onStartCommand received.")
-
+        Log.d(TAG, "➡️ onStartCommand extras=${intent?.extras}")
         val event = intent?.getStringExtra("event")
         val number = intent?.getStringExtra("phoneNumber")
         val direction = intent?.getStringExtra("direction")
 
-        Log.d("CallService", "onStartCommand extras: event=$event direction=$direction phoneNumber=$number")
-
         if (event == "ended") {
-            Log.d("CallService", "Received 'ended' intent — deferring final result to call log (numberOverride=$number).")
+            Log.d(TAG, "Received 'ended' intent — deferring final result to call log (numberOverride=$number).")
             readCallLogForLastCall(numberOverride = number, directionOverride = null, cooldown = true, retryCount = 0)
             return START_STICKY
         }
 
         if (!number.isNullOrEmpty() && !direction.isNullOrEmpty()) {
+            currentCallNumber = number
             if (currentCallDirection == null || currentCallDirection == "unknown") {
                 currentCallDirection = direction
             } else {
-                if (currentCallDirection == "outbound") {
-                    Log.d("CallService", "Keeping existing direction=outbound (do not overwrite from Intent).")
-                } else {
+                if (currentCallDirection != "outbound") {
                     currentCallDirection = direction
                 }
             }
-
-            currentCallNumber = number
-            Log.d("CallService", "Context set by Intent: $currentCallDirection to $currentCallNumber (Event: $event)")
 
             if (event == "outgoing_start") {
                 val payload = mapOf<String, Any?>(
@@ -95,15 +130,10 @@ class CallService : Service() {
                     "timestamp" to System.currentTimeMillis(),
                     "durationInSeconds" to null
                 )
-                Log.d("CallService", "DEBUG: Immediate forward outbound -> $payload")
-                if (eventSink != null) {
-                    mainHandler.post { eventSink?.success(payload) }
-                } else {
-                    Log.w("CallService", "⚠️ Flutter not connected yet → storing pending (outgoing)")
-                    pendingInitialEvent = payload
-                }
+                Log.d(TAG, "DEBUG: Immediate forward outbound -> $payload")
+                sendOrBufferEvent(payload)
             } else if (event != null && event != "state_change") {
-                sendCallEvent(number, currentCallDirection ?: direction, event, System.currentTimeMillis(), null)
+                sendCallEvent(number, currentCallDirection ?: direction, "answered", System.currentTimeMillis(), null)
             }
         }
 
@@ -111,33 +141,41 @@ class CallService : Service() {
     }
 
     private fun registerTelephonyCallback() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            modernCallback = CallStateCallback(this)
-            telephonyManager.registerTelephonyCallback(mainExecutor, modernCallback as CallStateCallback)
-            Log.d("CallService", "✅ Registered TelephonyCallback (API S+)")
-        } else {
-            @Suppress("DEPRECATION")
-            legacyListener = CallStateListener(this)
-            @Suppress("DEPRECATION")
-            telephonyManager.listen(legacyListener, PhoneStateListener.LISTEN_CALL_STATE)
-            Log.d("CallService", "✅ Registered PhoneStateListener (API < S)")
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                modernCallback = CallStateCallback(this)
+                telephonyManager.registerTelephonyCallback(mainExecutor, modernCallback as CallStateCallback)
+                Log.d(TAG, "✅ Registered TelephonyCallback (API S+)")
+            } else {
+                @Suppress("DEPRECATION")
+                legacyListener = CallStateListener(this)
+                @Suppress("DEPRECATION")
+                telephonyManager.listen(legacyListener, PhoneStateListener.LISTEN_CALL_STATE)
+                Log.d(TAG, "✅ Registered PhoneStateListener (API < S)")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error registering telephony callback: ${e.localizedMessage}", e)
         }
     }
 
     private fun unregisterTelephonyCallback() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            modernCallback?.let {
-                telephonyManager.unregisterTelephonyCallback(it)
-                modernCallback = null
-                Log.d("CallService", "✅ Unregistered TelephonyCallback")
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                modernCallback?.let {
+                    telephonyManager.unregisterTelephonyCallback(it)
+                    modernCallback = null
+                    Log.d(TAG, "✅ Unregistered TelephonyCallback")
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                legacyListener?.let {
+                    telephonyManager.listen(it, PhoneStateListener.LISTEN_NONE)
+                    legacyListener = null
+                    Log.d(TAG, "✅ Unregistered PhoneStateListener")
+                }
             }
-        } else {
-            @Suppress("DEPRECATION")
-            legacyListener?.let {
-                telephonyManager.listen(it, PhoneStateListener.LISTEN_NONE)
-                legacyListener = null
-                Log.d("CallService", "✅ Unregistered PhoneStateListener")
-            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error unregistering telephony callback: ${e.localizedMessage}", e)
         }
     }
 
@@ -158,10 +196,10 @@ class CallService : Service() {
     }
 
     fun handleCallStateUpdate(state: Int, incomingNumber: String?) {
-        Log.d("CallService", "📞 Listener State Change: ${stateToName(state)} (Incoming: $incomingNumber)")
+        Log.d(TAG, "📞 Listener State Change: ${stateToName(state)} (Incoming: $incomingNumber)")
 
         if (state == TelephonyManager.CALL_STATE_IDLE && System.currentTimeMillis() < lastCallEndTime + CALL_COOLDOWN_MS) {
-            Log.d("CallService", "🚫 DEDUPLICATED: IDLE event ignored due to cooldown.")
+            Log.d(TAG, "🚫 DEDUPLICATED: IDLE event ignored due to cooldown.")
             return
         }
 
@@ -175,7 +213,7 @@ class CallService : Service() {
                     if (numbersLikelyMatch(lastOutgoing, incomingNumber) || incomingNumber == null) {
                         currentCallNumber = lastOutgoing
                         currentCallDirection = "outbound"
-                        Log.d("CallService", "EARLY: Detected outgoing marker → treating call as OUTBOUND for $currentCallNumber")
+                        Log.d(TAG, "EARLY: Detected outgoing marker → treating call as OUTBOUND for $currentCallNumber")
                         prefs.edit().remove(KEY_LAST_OUTGOING).remove(KEY_LAST_OUTGOING_TS).apply()
 
                         sendCallEvent(currentCallNumber ?: "unknown", "outbound", "answered", System.currentTimeMillis(), null)
@@ -185,33 +223,39 @@ class CallService : Service() {
                 }
             }
         } catch (e: Exception) {
-            Log.e("CallService", "Error reading outgoing marker early: ${e.localizedMessage}")
+            Log.e(TAG, "Error reading outgoing marker early: ${e.localizedMessage}")
         }
 
-        if (state == TelephonyManager.CALL_STATE_OFFHOOK) {
-            if (previousCallState == TelephonyManager.CALL_STATE_RINGING) {
-                val dir = if (currentCallDirection == "outbound") "outbound" else "inbound"
-                sendCallEvent(currentCallNumber ?: incomingNumber ?: "unknown", currentCallDirection ?: dir, "answered", System.currentTimeMillis(), null)
-            } else if (previousCallState == TelephonyManager.CALL_STATE_IDLE) {
-                if (currentCallNumber.isNullOrEmpty()) {
-                    readCallLogForLastCall()
-                } else {
-                    sendCallEvent(currentCallNumber!!, currentCallDirection ?: "outbound", "answered", System.currentTimeMillis(), null)
+        when (state) {
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                if (previousCallState == TelephonyManager.CALL_STATE_RINGING) {
+                    val dir = if (currentCallDirection == "outbound") "outbound" else "inbound"
+                    sendCallEvent(currentCallNumber ?: incomingNumber ?: "unknown", currentCallDirection ?: dir, "answered", System.currentTimeMillis(), null)
+                } else if (previousCallState == TelephonyManager.CALL_STATE_IDLE) {
+                    if (currentCallNumber.isNullOrEmpty()) {
+                        readCallLogForLastCall()
+                    } else {
+                        sendCallEvent(currentCallNumber!!, currentCallDirection ?: "outbound", "answered", System.currentTimeMillis(), null)
+                    }
                 }
             }
-        } else if (state == TelephonyManager.CALL_STATE_IDLE) {
-            if (previousCallState == TelephonyManager.CALL_STATE_OFFHOOK) {
-                handleCallEndedAfterOffhook()
-            } else if (previousCallState == TelephonyManager.CALL_STATE_RINGING) {
-                handleCallEndedAfterRinging(incomingNumber)
+
+            TelephonyManager.CALL_STATE_IDLE -> {
+                if (previousCallState == TelephonyManager.CALL_STATE_OFFHOOK) {
+                    handleCallEndedAfterOffhook()
+                } else if (previousCallState == TelephonyManager.CALL_STATE_RINGING) {
+                    handleCallEndedAfterRinging(incomingNumber)
+                }
+                currentCallNumber = null
+                currentCallDirection = null
+                lastCallEndTime = System.currentTimeMillis()
             }
-            currentCallNumber = null
-            currentCallDirection = null
-            lastCallEndTime = System.currentTimeMillis()
-        } else if (state == TelephonyManager.CALL_STATE_RINGING) {
-            Log.d("CallService", "RINGING event received via listener.")
-            if (currentCallDirection == null) currentCallDirection = "inbound"
-            if (currentCallNumber == null && !incomingNumber.isNullOrEmpty()) currentCallNumber = incomingNumber
+
+            TelephonyManager.CALL_STATE_RINGING -> {
+                Log.d(TAG, "RINGING event via listener.")
+                if (currentCallDirection == null) currentCallDirection = "inbound"
+                if (currentCallNumber == null && !incomingNumber.isNullOrEmpty()) currentCallNumber = incomingNumber
+            }
         }
 
         previousCallState = state
@@ -219,17 +263,16 @@ class CallService : Service() {
 
     private fun handleCallEndedAfterOffhook() {
         if (currentCallNumber.isNullOrEmpty()) {
-            Log.e("CallService", "❌ ERROR: Call ended (OFFHOOK->IDLE) but currentCallNumber is missing.")
+            Log.e(TAG, "❌ Call ended (OFFHOOK->IDLE) but currentCallNumber is missing.")
             return
         }
-
         readCallLogForLastCall(numberOverride = currentCallNumber, directionOverride = currentCallDirection, cooldown = true, retryCount = 0)
     }
 
     private fun handleCallEndedAfterRinging(incomingNumber: String?) {
         val finalNumber = currentCallNumber ?: incomingNumber
         if (finalNumber.isNullOrEmpty()) {
-            Log.e("CallService", "❌ ERROR: Call ended (RINGING->IDLE) but no number available.")
+            Log.e(TAG, "❌ Call ended (RINGING->IDLE) but no number available.")
             return
         }
         readCallLogForLastCall(numberOverride = finalNumber, directionOverride = "inbound", cooldown = true, retryCount = 0)
@@ -242,14 +285,14 @@ class CallService : Service() {
         retryCount: Int = 0
     ) {
         if (checkSelfPermission(android.Manifest.permission.READ_CALL_LOG) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            Log.e("CallService", "❌ READ_CALL_LOG permission not granted for failsafe.")
+            Log.e(TAG, "❌ READ_CALL_LOG permission not granted for failsafe.")
             val outgoing = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LAST_OUTGOING, null)
             val fallbackNumber = numberOverride ?: outgoing
             if (!fallbackNumber.isNullOrEmpty()) {
                 val ts = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(KEY_LAST_OUTGOING_TS, System.currentTimeMillis())
                 emitFinalCallEventIfNotLocked(fallbackNumber, "ended", ts, null, directionOverride)
             } else {
-                Log.w("CallService", "No fallback due to missing number and missing permission.")
+                Log.w(TAG, "No fallback due to missing number and missing permission.")
             }
             return
         }
@@ -272,14 +315,14 @@ class CallService : Service() {
                 )
 
                 if (cursor == null || cursor.count == 0) {
-                    Log.w("CallService", "Call log query returned empty or null.")
+                    Log.w(TAG, "Call log query returned empty or null.")
                     if (retryCount < CALL_LOG_RETRY_MAX - 1) {
-                        Log.d("CallService", "Retrying call-log read after short delay. retry=${retryCount + 1}")
+                        Log.d(TAG, "Retrying call-log read after short delay. retry=${retryCount + 1}")
                         mainHandler.postDelayed({
                             readCallLogForLastCall(numberOverride, directionOverride, cooldown, retryCount + 1)
                         }, CALL_LOG_RETRY_DELAY_MS)
                     } else {
-                        Log.w("CallService", "Max retries reached and no usable rows. Attempting fallback if possible.")
+                        Log.w(TAG, "Max retries reached and no usable rows. Attempting fallback if possible.")
                         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                         val outgoing = prefs.getString(KEY_LAST_OUTGOING, null)
                         val fallbackNumber = numberOverride ?: outgoing
@@ -287,7 +330,7 @@ class CallService : Service() {
                             val ts = prefs.getLong(KEY_LAST_OUTGOING_TS, System.currentTimeMillis())
                             emitFinalCallEventIfNotLocked(fallbackNumber, "ended", ts, null, directionOverride)
                         } else {
-                            Log.w("CallService", "No number available to emit final; skipping fallback.")
+                            Log.w(TAG, "No number available to emit final; skipping fallback.")
                         }
                     }
                     return@postDelayed
@@ -311,21 +354,21 @@ class CallService : Service() {
                         direction = "outbound"
                     }
 
-                    Log.w("CallService", "🚨 Call Log Result (picked): $outcome ($direction) to $num, Duration: $dur ts:$ts")
+                    Log.w(TAG, "🚨 Call Log Result (picked): $outcome ($direction) to $num, Duration: $dur ts:$ts")
                     emitFinalCallEventIfNotLocked(num, outcome, ts, dur, direction)
                 } else {
-                    Log.w("CallService", "No suitable call-log row found after retries.")
+                    Log.w(TAG, "No suitable call-log row found after retries.")
                     val outgoing = prefs.getString(KEY_LAST_OUTGOING, null)
                     val fallbackNumber = numberOverride ?: outgoing
                     if (!fallbackNumber.isNullOrEmpty()) {
                         val ts = prefs.getLong(KEY_LAST_OUTGOING_TS, System.currentTimeMillis())
                         emitFinalCallEventIfNotLocked(fallbackNumber, "ended", ts, null, directionOverride)
                     } else {
-                        Log.w("CallService", "No number available to emit final; skipping fallback.")
+                        Log.w(TAG, "No number available to emit final; skipping fallback.")
                     }
                 }
             } catch (e: Exception) {
-                Log.e("CallService", "❌ Error reading Call Log: $e")
+                Log.e(TAG, "❌ Error reading Call Log: $e")
                 val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val outgoing = prefs.getString(KEY_LAST_OUTGOING, null)
                 val fallbackNumber = numberOverride ?: outgoing
@@ -333,7 +376,7 @@ class CallService : Service() {
                     val ts = prefs.getLong(KEY_LAST_OUTGOING_TS, System.currentTimeMillis())
                     emitFinalCallEventIfNotLocked(fallbackNumber, "ended", ts, null, directionOverride)
                 } else {
-                    Log.w("CallService", "No number available to emit final after error; skipping fallback.")
+                    Log.w(TAG, "No number available to emit final after error; skipping fallback.")
                 }
             } finally {
                 cursor?.close()
@@ -360,34 +403,25 @@ class CallService : Service() {
         if (rows.isEmpty()) return null
 
         outgoingMarker?.let { (markerNumber, markerTs) ->
-            val toleranceMs = OUTGOING_MARKER_WINDOW_MS
-            val matches = rows.filter { it.number != null && numbersLikelyMatch(it.number, markerNumber) && abs(it.timestamp - markerTs) <= toleranceMs }
-            if (matches.isNotEmpty()) {
-                return matches.maxByOrNull { it.duration }
-            }
+            val tol = OUTGOING_MARKER_WINDOW_MS
+            val matches = rows.filter { it.number != null && numbersLikelyMatch(it.number, markerNumber) && abs(it.timestamp - markerTs) <= tol }
+            if (matches.isNotEmpty()) return matches.maxByOrNull { it.duration }
         }
 
         val withDur = rows.filter { it.duration > 0 }
-        if (withDur.isNotEmpty()) {
-            return withDur.maxByOrNull { it.duration }
-        }
+        if (withDur.isNotEmpty()) return withDur.maxByOrNull { it.duration }
         return rows.maxByOrNull { it.timestamp }
     }
 
-    // NEW: infer outcome/direction from CallLog type (fallback if directionOverride provided)
     private fun getOutcomeAndDirectionFromType(callType: Int, directionOverride: String? = null): Pair<String, String> {
-        // CallLog.Calls.TYPE values:
-        // 1 = INCOMING_TYPE, 2 = OUTGOING_TYPE, 3 = MISSED_TYPE, 4 = VOICEMAIL_TYPE, 5 = REJECTED_TYPE, 6 = BLOCKED_TYPE, 7 = ANSWERED_EXTERNALLY
         return when (callType) {
             CallLog.Calls.INCOMING_TYPE -> Pair("ended", "inbound")
             CallLog.Calls.OUTGOING_TYPE -> Pair("outgoing_start", "outbound")
             CallLog.Calls.MISSED_TYPE -> Pair("missed", "inbound")
             CallLog.Calls.VOICEMAIL_TYPE -> Pair("voicemail", "inbound")
-            // Some vendors map REJECTED to type 5 or use MISSED; treat as rejected/inbound
             5 -> Pair("rejected", "inbound")
             CallLog.Calls.ANSWERED_EXTERNALLY_TYPE -> Pair("answered_external", "inbound")
             else -> {
-                // fallback: use directionOverride or default inbound-ended
                 if (!directionOverride.isNullOrEmpty()) {
                     val out = if (directionOverride == "outbound") "outgoing_start" else "ended"
                     Pair(out, directionOverride)
@@ -401,7 +435,7 @@ class CallService : Service() {
     private fun emitFinalCallEventIfNotLocked(phoneNumber: String, finalOutcome: String, timestampMs: Long, durationSec: Int?, directionOverride: String? = null) {
         val normalized = normalizeNumber(phoneNumber) ?: ""
         if (normalized.isEmpty()) {
-            Log.w("CallService", "emitFinalCallEventIfNotLocked: normalized phone empty → skipping.")
+            Log.w(TAG, "emitFinalCallEventIfNotLocked: normalized phone empty → skipping.")
             return
         }
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -409,7 +443,7 @@ class CallService : Service() {
         val lockedUntil = prefs.getLong(lockKey, 0L)
         val now = System.currentTimeMillis()
         if (now < lockedUntil) {
-            Log.d("CallService", "Finalization for $normalized currently locked until $lockedUntil — skipping.")
+            Log.d(TAG, "Finalization for $normalized currently locked until $lockedUntil — skipping.")
             return
         }
         prefs.edit().putLong(lockKey, now + FINAL_LOCK_TTL_MS).apply()
@@ -417,11 +451,9 @@ class CallService : Service() {
     }
 
     private fun emitFinalCallEvent(phoneNumber: String, finalOutcome: String, timestampMs: Long, durationSec: Int?, directionOverride: String? = null) {
-        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val normalized = normalizeNumber(phoneNumber) ?: ""
-
         if (normalized.isEmpty()) {
-            Log.w("CallService", "emitFinalCallEvent: empty phoneNumber — skipping emit.")
+            Log.w(TAG, "emitFinalCallEvent: empty phoneNumber — skipping emit.")
             return
         }
 
@@ -433,13 +465,13 @@ class CallService : Service() {
         }
 
         val lastFinalKey = "last_final_ts_$normalized"
-        val lastFinalTs = prefs.getLong(lastFinalKey, 0L)
+        val lastFinalTs = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(lastFinalKey, 0L)
         val lastDurKey = "last_final_dur_$normalized"
-        val lastDur = prefs.getInt(lastDurKey, -1)
+        val lastDur = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(lastDurKey, -1)
 
         if (lastFinalTs != 0L && abs(lastFinalTs - timestampMs) < 2000L) {
             if (durationSec == null || durationSec == lastDur) {
-                Log.d("CallService", "Skipping duplicate final event for $normalized (ts close and dur unchanged)")
+                Log.d(TAG, "Skipping duplicate final event for $normalized (ts close and dur unchanged)")
                 return
             }
         }
@@ -452,15 +484,31 @@ class CallService : Service() {
             "durationInSeconds" to durationSec
         )
 
-        Log.d("CallService", "📤 Emitting final event to Flutter: $payload")
-        if (eventSink == null) {
-            Log.w("CallService", "⚠️ Flutter not connected yet → storing pending final")
-            pendingInitialEvent = payload
-        } else {
-            mainHandler.post { eventSink?.success(payload) }
-        }
+        Log.d(TAG, "📤 Emitting final event to Flutter: $payload")
+        sendOrBufferEvent(payload)
 
-        prefs.edit().putLong(lastFinalKey, timestampMs).putInt(lastDurKey, durationSec ?: -1).apply()
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong(lastFinalKey, timestampMs).putInt(lastDurKey, durationSec ?: -1).apply()
+    }
+
+    private fun sendOrBufferEvent(payload: Map<String, Any?>) {
+        try {
+            if (eventSink == null) {
+                Log.w(TAG, "⚠️ Flutter not connected yet → buffering pending event")
+                pendingInitialEvent = payload
+            } else {
+                mainHandler.post {
+                    try {
+                        eventSink?.success(payload)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error sending event to flutter: ${e.localizedMessage}")
+                        pendingInitialEvent = payload
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "sendOrBufferEvent error: ${e.localizedMessage}")
+            pendingInitialEvent = payload
+        }
     }
 
     private fun readOutgoingMarker(): Pair<String, Long>? {
@@ -479,19 +527,13 @@ class CallService : Service() {
             "timestamp" to timestamp,
             "durationInSeconds" to durationInSeconds,
         )
-        Log.d("CallService", "📤 Sending event to Flutter: $data")
-        if (eventSink == null) {
-            Log.w("CallService", "⚠️ Flutter not connected yet → storing pending")
-            pendingInitialEvent = data
-            return
-        }
-        mainHandler.post { eventSink?.success(data) }
+        Log.d(TAG, "📤 Sending event to Flutter: $data")
+        sendOrBufferEvent(data)
     }
 
     private fun buildNotification(): Notification {
-        val notificationChannelId = "call_channel"
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, notificationChannelId)
+            Notification.Builder(this, NOTIF_CHANNEL_ID)
                 .setContentTitle("Call Tracking Running")
                 .setContentText("Detecting call events")
                 .setSmallIcon(android.R.drawable.sym_call_incoming)
@@ -505,10 +547,14 @@ class CallService : Service() {
         }
     }
 
-    private fun createChannel() {
+    private fun createNotificationChannelIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel("call_channel", "Call Tracking", NotificationManager.IMPORTANCE_LOW)
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            try {
+                val channel = NotificationChannel(NOTIF_CHANNEL_ID, NOTIF_CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW)
+                getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error creating notification channel: ${e.localizedMessage}")
+            }
         }
     }
 
@@ -517,7 +563,7 @@ class CallService : Service() {
     override fun onDestroy() {
         unregisterTelephonyCallback()
         super.onDestroy()
-        Log.d("CallService", "🛑 Service destroyed")
+        Log.d(TAG, "🛑 Service destroyed")
     }
 
     private fun stateToName(state: Int): String {

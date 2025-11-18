@@ -11,7 +11,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final LeadService _leadService = LeadService();
+  final LeadService _leadService = LeadService.instance;
   bool _loading = true;
   List<Lead> _leads = [];
 
@@ -24,8 +24,11 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadLeads() async {
     setState(() => _loading = true);
     await _leadService.loadLeads();
+
+    // copy into a mutable list (service may return unmodifiable)
+    _leads = List<Lead>.from(_leadService.getAll());
+
     setState(() {
-      _leads = _leadService.getAll();
       _loading = false;
     });
   }
@@ -71,38 +74,25 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // ===============================
-                    // DASHBOARD STATS
-                    // ===============================
                     const Text("Dashboard",
                         style: TextStyle(
                             fontSize: 22, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 10),
-
                     Wrap(
                       spacing: 12,
                       children: [
                         _statCard("Total Leads", _leads.length, Colors.blue),
                         _statCard(
                             "Follow Up",
-                            _leads
-                                .where((e) => e.status == "Follow Up")
-                                .length,
+                            _leads.where((e) => e.status == "Follow Up").length,
                             Colors.orange),
                         _statCard(
                             "Interested",
-                            _leads
-                                .where((e) => e.status == "Interested")
-                                .length,
+                            _leads.where((e) => e.status == "Interested").length,
                             Colors.green),
                       ],
                     ),
-
                     const SizedBox(height: 20),
-
-                    // ===============================
-                    // BUTTON → OPEN LEAD LIST
-                    // ===============================
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(

@@ -1,6 +1,5 @@
 // lib/call_event_handler.dart
-// Patched: dedupe intermediate saves, consolidate session events on finalize,
-// accept late authoritative duration updates and update final record only once.
+// (This is your file with minimal, targeted tweaks for clarity/dedup logging.)
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -263,8 +262,6 @@ class CallEventHandler {
       final consolidated = _consolidateEvents(buf.events);
 
       // Choose best timestamp/duration for final save:
-      // - prefer an event that contains duration (authoritative)
-      // - otherwise use the latest event timestamp
       int? chosenDuration;
       int chosenTimestamp = timestampMs;
       for (final e in consolidated.reversed) {
@@ -537,7 +534,6 @@ class _CallSessionBuffer {
 
   void scheduleAutoFinalize(void Function() callback) {
     _autoFinalizeTimer?.cancel();
-    if (callback == null) return;
     _autoFinalizeTimer = Timer(Duration(milliseconds: autoFinalizeMs), () {
       callback();
     });
@@ -566,4 +562,3 @@ class _CallEvent {
 
   static _CallEvent empty() => _CallEvent(type: 'empty', timestampMs: 0, direction: 'unknown');
 }
-  

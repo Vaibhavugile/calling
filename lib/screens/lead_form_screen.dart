@@ -1,5 +1,3 @@
-// lib/screens/lead_form_screen.dart
-
 import 'package:flutter/material.dart';
 import '../models/lead.dart';
 import '../services/lead_service.dart';
@@ -13,7 +11,7 @@ const Color _accentColor = Color(0xFFE6A600); // Gold/Amber
 class LeadFormScreen extends StatefulWidget {
   final Lead lead;
   final bool autoOpenedFromCall;
-  
+
   const LeadFormScreen({
     super.key,
     required this.lead,
@@ -25,17 +23,16 @@ class LeadFormScreen extends StatefulWidget {
 }
 
 class _LeadFormScreenState extends State<LeadFormScreen> {
-  final LeadService _service = LeadService();
+  final LeadService _service = LeadService.instance;
 
   late Lead _lead;
 
   late TextEditingController _nameController;
   late TextEditingController _noteController;
-  late TextEditingController _phoneController; 
+  late TextEditingController _phoneController;
 
-  bool _hasUnsavedNameChanges = false; 
-  // 🔥 NEW: Track if the user has explicitly interacted with the form
-  bool _hasUserSavedOrNoted = false; 
+  bool _hasUnsavedNameChanges = false;
+  bool _hasUserSavedOrNoted = false;
 
   final List<String> _statusOptions = [
     "new",
@@ -57,19 +54,12 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
     _nameController.addListener(_checkUnsavedChanges);
   }
 
-  // -------------------------------------------------------------------------
-  // 🔥 CRITICAL: DISPOSE LOGIC FOR MANUAL REVIEW
-  // -------------------------------------------------------------------------
   @override
   void dispose() {
-    // If the screen was auto-opened from a call AND the user didn't save/note, 
-    // AND the lead is persistent, mark it for review.
     if (widget.autoOpenedFromCall && !_hasUserSavedOrNoted && _lead.id.isNotEmpty) {
       print("⚠️ UI closed without save/note. Marking Lead ${_lead.id} for manual review.");
-      
-      // Perform review update in the background.
       _service.markLeadForReview(_lead.id, true).catchError((e) {
-          print("❌ Error marking lead for review: $e");
+        print("❌ Error marking lead for review: $e");
       });
     }
 
@@ -79,12 +69,7 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
     _phoneController.dispose();
     super.dispose();
   }
-  
-  // -------------------------------------------------------------------------
-  // UTILS
-  // -------------------------------------------------------------------------
-  
-  /// Converts seconds to a human-readable string (e.g., '1m 35s').
+
   String _formatDuration(int seconds) {
     if (seconds < 60) return '${seconds}s';
     final minutes = (seconds ~/ 60);
@@ -94,35 +79,26 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
 
   String _formatDate(DateTime dt) {
     final d = dt.toLocal();
-    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}  "
+    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}  "
         "${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}";
   }
 
-  // -------------------------------------------------------------------------
-  // PERSISTENCE CORE LOGIC
-  // -------------------------------------------------------------------------
-  
   Future<void> _persistLeadIfTransient() async {
     if (_lead.id.isEmpty) {
       print("📝 First save: Persisting new lead for ${_lead.phoneNumber}");
-      
       final persistedLead = await _service.createLead(_lead.phoneNumber);
-      
       final updatedTransientLead = persistedLead.copyWith(
-        name: _nameController.text.trim(), 
+        name: _nameController.text.trim(),
         status: _lead.status,
         callHistory: _lead.callHistory,
         notes: _lead.notes,
         lastCallOutcome: _lead.lastCallOutcome,
-        lastInteraction: DateTime.now(), 
-        lastUpdated: DateTime.now(), 
+        lastInteraction: DateTime.now(),
+        lastUpdated: DateTime.now(),
       );
-
-      // Use the public saveLead method which clears the review flag
-      await _service.saveLead(updatedTransientLead); 
-
+      await _service.saveLead(updatedTransientLead);
       setState(() {
-          _lead = updatedTransientLead;
+        _lead = updatedTransientLead;
       });
     }
   }
@@ -130,69 +106,56 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
   void _checkUnsavedChanges() {
     final currentName = _nameController.text.trim();
     final hasChanges = currentName != _lead.name;
-    
+
     if (hasChanges != _hasUnsavedNameChanges) {
-        setState(() {
-            _hasUnsavedNameChanges = hasChanges;
-        });
+      setState(() {
+        _hasUnsavedNameChanges = hasChanges;
+      });
     }
   }
 
-  // -----------------------------------------
-  // SAVE LEAD (Triggered by Save button/Status change)
-  // -----------------------------------------
   Future<void> _saveLead({String? newStatus, String? newName}) async {
     await _persistLeadIfTransient();
 
     final name = newName ?? _nameController.text.trim();
     final status = newStatus ?? _lead.status;
-    
+
     if (name == _lead.name && status == _lead.status && newStatus == null && newName == null) {
       return;
     }
 
-    // Use the public service method which also handles saving and clearing the review flag
-    final updated = await _service.updateLead(
-        id: _lead.id,
-        name: name,
-        status: status,
-    );
-    
-    // 🔥 NEW: User has performed an action
-    _hasUserSavedOrNoted = true; 
-    
-    // Update local state and reset the flag
+    final updated = await _service.updateLead(id: _lead.id, name: name, status: status);
+
+    _hasUserSavedOrNoted = true;
+
     setState(() {
       _lead = updated;
       _hasUnsavedNameChanges = false;
+      _nameController.text = _lead.name;
     });
 
     _checkUnsavedChanges();
   }
 
-  // -----------------------------------------
-  // ADD NOTE
-  // -----------------------------------------
   Future<void> _addNote() async {
     if (_noteController.text.isEmpty) return;
-    await _persistLeadIfTransient(); // Ensure lead exists before adding a note
+    await _persistLeadIfTransient();
 
     final String note = _noteController.text.trim();
     _noteController.clear();
 
     try {
-      // ✅ FIX: Call the service method with the local _lead object
       await _service.addNote(lead: _lead, note: note);
 
-      // 🔥 NEW: User has performed an action
-      _hasUserSavedOrNoted = true; 
+      _hasUserSavedOrNoted = true;
 
-      // After saving, refresh the local state to include the new note and cleared review flag
       final updatedLead = await _service.getLead(leadId: _lead.id);
 
       setState(() {
         if (updatedLead != null) {
           _lead = updatedLead;
+          _nameController.text = _lead.name;
+          _phoneController.text = _lead.phoneNumber;
         }
       });
     } catch (e) {
@@ -200,9 +163,6 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
     }
   }
 
-  // -----------------------------------------
-  // UI: SECTION TITLE
-  // -----------------------------------------
   Widget _sectionTitle(String text) {
     return Padding(
       padding: const EdgeInsets.only(top: 24, bottom: 8),
@@ -211,20 +171,17 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
         style: const TextStyle(
           fontSize: 18,
           fontWeight: FontWeight.bold,
-          color: _primaryColor, // Deep Indigo
+          color: _primaryColor,
           letterSpacing: 0.5,
         ),
       ),
     );
   }
 
-  // -----------------------------------------
-  // UI: HEADER CARD (Now shows phone number and review status)
-  // -----------------------------------------
   Widget _headerCard() {
     final bool needsReview = _lead.needsManualReview;
     final String callOutcome = _lead.lastCallOutcome.toUpperCase();
-    
+
     Color outcomeColor;
     if (callOutcome == 'MISSED' || callOutcome == 'REJECTED') {
       outcomeColor = Colors.red.shade700;
@@ -238,10 +195,7 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
       elevation: 6,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        // Gold border if review is needed
-        side: needsReview 
-            ? const BorderSide(color: _accentColor, width: 3) 
-            : BorderSide.none,
+        side: needsReview ? const BorderSide(color: _accentColor, width: 3) : BorderSide.none,
       ),
       child: Padding(
         padding: const EdgeInsets.all(20),
@@ -258,31 +212,25 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
                 child: const Text(
                   'ACTION REQUIRED',
                   style: TextStyle(
-                    color: _primaryColor, 
-                    fontWeight: FontWeight.bold, 
-                    fontSize: 12
+                    color: _primaryColor,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
                   ),
                 ),
               ),
             if (needsReview) const SizedBox(height: 12),
-            
             Row(
               children: [
                 CircleAvatar(
                   radius: 28,
                   backgroundColor: _primaryColor,
-                  child: const Icon(Icons.perm_phone_msg_outlined,
-                      size: 28, color: Colors.white),
+                  child: const Icon(Icons.perm_phone_msg_outlined, size: 28, color: Colors.white),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: Text(
                     _lead.phoneNumber,
-                    style: const TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w900,
-                      color: _primaryColor,
-                    ),
+                    style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: _primaryColor),
                   ),
                 ),
               ],
@@ -291,11 +239,7 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
               const Divider(height: 24),
               Text(
                 'Last Call Outcome: ${callOutcome}',
-                style: TextStyle(
-                  fontSize: 16,
-                  color: outcomeColor,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: TextStyle(fontSize: 16, color: outcomeColor, fontWeight: FontWeight.w700),
               ),
             ]
           ],
@@ -304,14 +248,8 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
     );
   }
 
-
-  // -----------------------------------------
-  // UI: CALL HISTORY SECTION
-  // -----------------------------------------
   Widget _callHistorySection() {
-    if (_lead.callHistory.isEmpty) {
-      return const Text("No call history recorded.");
-    }
+    if (_lead.callHistory.isEmpty) return const Text("No call history recorded.");
 
     return Column(
       children: _lead.callHistory.reversed.map((call) {
@@ -333,11 +271,8 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
           default:
             color = Colors.blue.shade600;
         }
-        
-        final durationText = call.durationInSeconds != null
-            ? ' (${_formatDuration(call.durationInSeconds!)})'
-            : '';
 
+        final durationText = call.durationInSeconds != null ? ' (${_formatDuration(call.durationInSeconds!)})' : '';
 
         return Padding(
           padding: const EdgeInsets.only(bottom: 8.0),
@@ -349,10 +284,7 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
             ),
             child: ListTile(
               leading: Icon(icon, color: color),
-              title: Text(
-                "${call.direction} – ${call.outcome.toUpperCase()}$durationText",
-                style: TextStyle(fontWeight: FontWeight.w600, color: color),
-              ),
+              title: Text("${call.direction} – ${call.outcome.toUpperCase()}$durationText", style: TextStyle(fontWeight: FontWeight.w600, color: color)),
               subtitle: Text(_formatDate(call.timestamp), style: const TextStyle(fontSize: 12)),
             ),
           ),
@@ -361,22 +293,15 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
     );
   }
 
-  // -----------------------------------------
-  // UI: NOTES SECTION
-  // -----------------------------------------
   Widget _notesSection() {
-    if (_lead.notes.isEmpty) {
-      return const Text("No notes yet");
-    }
+    if (_lead.notes.isEmpty) return const Text("No notes yet");
 
     return Column(
       children: _lead.notes.reversed.map((note) {
         return Card(
           elevation: 1,
           color: Colors.grey.shade50,
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-              side: BorderSide(color: Colors.grey.shade300)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.grey.shade300)),
           child: ListTile(
             leading: const Icon(Icons.edit_note, color: _primaryColor),
             title: Text(note.text, style: const TextStyle(fontWeight: FontWeight.w500)),
@@ -387,17 +312,13 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
     );
   }
 
-  // -----------------------------------------
-  // MAIN UI
-  // -----------------------------------------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
-        title:
-            Text(widget.autoOpenedFromCall ? "Call Lead Review" : "Lead Details"),
-        backgroundColor: _primaryColor, // Premium Primary Color
+        title: Text(widget.autoOpenedFromCall ? "Call Lead Review" : "Lead Details"),
+        backgroundColor: _primaryColor,
         foregroundColor: Colors.white,
         elevation: 4,
         actions: [
@@ -411,106 +332,72 @@ class _LeadFormScreenState extends State<LeadFormScreen> {
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _headerCard(),
-
-            // PHONE NUMBER (Read Only)
-            _sectionTitle("Phone Number"),
-            TextField(
-              controller: _phoneController,
-              readOnly: true, 
-              style: const TextStyle(fontWeight: FontWeight.bold),
-              decoration: InputDecoration(
-                filled: true,
-                fillColor: Colors.grey.shade100,
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _headerCard(),
+          _sectionTitle("Phone Number"),
+          TextField(
+            controller: _phoneController,
+            readOnly: true,
+            style: const TextStyle(fontWeight: FontWeight.bold),
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: Colors.grey.shade100,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+          _sectionTitle("Lead Name"),
+          TextField(
+            controller: _nameController,
+            decoration: InputDecoration(
+              hintText: "Enter lead name",
+              filled: true,
+              fillColor: Colors.grey.shade100,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+            onSubmitted: (val) => _saveLead(newName: val),
+            onEditingComplete: () => _saveLead(newName: _nameController.text.trim()),
+          ),
+          _sectionTitle("Status"),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: _primaryColor.withOpacity(0.3)),
+            ),
+            child: DropdownButton<String>(
+              value: _lead.status,
+              isExpanded: true,
+              underline: const SizedBox(),
+              style: const TextStyle(color: _primaryColor, fontWeight: FontWeight.w600, fontSize: 16),
+              items: _statusOptions.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
+              onChanged: (val) async {
+                if (val == null) return;
+                await _saveLead(newStatus: val);
+              },
+            ),
+          ),
+          _sectionTitle("Call History"),
+          _callHistorySection(),
+          _sectionTitle("Notes"),
+          _notesSection(),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _noteController,
+            minLines: 1,
+            maxLines: 3,
+            decoration: InputDecoration(
+              hintText: "Write a follow-up note...",
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              suffixIcon: Container(
+                margin: const EdgeInsets.all(8),
+                decoration: BoxDecoration(color: _accentColor, shape: BoxShape.circle),
+                child: IconButton(icon: const Icon(Icons.send, color: Colors.white), onPressed: _addNote, tooltip: 'Add Note'),
               ),
             ),
-
-
-            // NAME (Editable)
-            _sectionTitle("Lead Name"),
-            TextField(
-              controller: _nameController,
-              decoration: InputDecoration(
-                hintText: "Enter lead name",
-                filled: true,
-                fillColor: Colors.grey.shade100,
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-              ),
-              onSubmitted: (val) => _saveLead(newName: val),
-              onEditingComplete: () => _saveLead(newName: _nameController.text.trim()),
-            ),
-
-            // STATUS
-            _sectionTitle("Status"),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: _primaryColor.withOpacity(0.3)),
-              ),
-              child: DropdownButton<String>(
-                value: _lead.status,
-                isExpanded: true,
-                underline: const SizedBox(),
-                style: const TextStyle(
-                  color: _primaryColor, 
-                  fontWeight: FontWeight.w600, 
-                  fontSize: 16
-                ),
-                items: _statusOptions.map((s) {
-                  return DropdownMenuItem(value: s, child: Text(s));
-                }).toList(),
-                onChanged: (val) async {
-                  if (val == null) return;
-                  await _saveLead(newStatus: val);
-                },
-              ),
-            ),
-
-            // CALL HISTORY
-            _sectionTitle("Call History"),
-            _callHistorySection(),
-
-            // NOTES
-            _sectionTitle("Notes"),
-            _notesSection(),
-
-            const SizedBox(height: 12),
-
-            // NOTE INPUT FIELD
-            TextField(
-              controller: _noteController,
-              minLines: 1,
-              maxLines: 3,
-              decoration: InputDecoration(
-                hintText: "Write a follow-up note...",
-                border:
-                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                suffixIcon: Container(
-                  margin: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: _accentColor,
-                    shape: BoxShape.circle
-                  ),
-                  child: IconButton(
-                    icon: const Icon(Icons.send, color: Colors.white),
-                    onPressed: _addNote,
-                    tooltip: 'Add Note',
-                  ),
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 40),
-          ],
-        ),
+          ),
+          const SizedBox(height: 40),
+        ]),
       ),
     );
   }

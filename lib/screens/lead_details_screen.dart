@@ -1,5 +1,3 @@
-// lib/screens/lead_details_screen.dart
-
 import 'package:flutter/material.dart';
 import '../models/lead.dart';
 import '../services/lead_service.dart';
@@ -17,14 +15,13 @@ class LeadDetailsScreen extends StatefulWidget {
 }
 
 class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
-  final LeadService _service = LeadService();
+  final LeadService _service = LeadService.instance;
 
   late Lead _lead;
 
-  // Controller for the read-only phone number field
-  late TextEditingController _phoneController; 
-  
-  // ✅ FIX: Note controller added
+  // Controllers are created once and updated when lead changes
+  late TextEditingController _phoneController;
+  late TextEditingController _nameController;
   late TextEditingController _noteController;
 
   final List<String> _statusOptions = [
@@ -40,23 +37,32 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
   void initState() {
     super.initState();
     _lead = widget.lead;
-    // Initialize controllers
     _phoneController = TextEditingController(text: _lead.phoneNumber);
-    _noteController = TextEditingController(); // ✅ FIX: Initialized
+    _nameController = TextEditingController(text: _lead.name);
+    _noteController = TextEditingController();
+  }
+
+  @override
+  void didUpdateWidget(covariant LeadDetailsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // If widget.lead changed externally, update local state + controllers
+    if (widget.lead.id != oldWidget.lead.id) {
+      setState(() {
+        _lead = widget.lead;
+        _phoneController.text = _lead.phoneNumber;
+        _nameController.text = _lead.name;
+      });
+    }
   }
 
   @override
   void dispose() {
     _phoneController.dispose();
-    _noteController.dispose(); // ✅ FIX: Disposed
+    _nameController.dispose();
+    _noteController.dispose();
     super.dispose();
   }
-  
-  // -------------------------------------------------------------------------
-  // UTILITY METHODS
-  // -------------------------------------------------------------------------
 
-  /// Converts seconds to a human-readable string (e.g., '1m 35s').
   String _formatDuration(int seconds) {
     if (seconds < 60) return '${seconds}s';
     final minutes = (seconds ~/ 60);
@@ -66,59 +72,52 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
 
   String _formatDate(DateTime dt) {
     final d = dt.toLocal();
-    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}  "
+    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}  "
         "${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}";
   }
 
-  // -------------------------------------------------------------------------
-  // PERSISTENCE & ACTIONS
-  // -------------------------------------------------------------------------
-  
   Future<void> _saveStatus(String newStatus) async {
     final updated = _lead.copyWith(
       status: newStatus,
-      lastInteraction: DateTime.now(), 
-      lastUpdated: DateTime.now(), 
+      lastInteraction: DateTime.now(),
+      lastUpdated: DateTime.now(),
     );
-    
-    // Assumes lead.id is not empty for a Details screen
+
     await _service.saveLead(updated);
-    
+
     setState(() {
       _lead = updated;
+      _nameController.text = _lead.name;
+      _phoneController.text = _lead.phoneNumber;
     });
   }
 
-
-  // ✅ FIX: Correct logic to save note and refresh lead state.
   Future<void> _addNote() async {
     if (_noteController.text.isEmpty) return;
 
     final String note = _noteController.text.trim();
-    _noteController.clear(); // Clear the text field immediately
+    _noteController.clear();
 
     try {
-      // 1. Save the note. Note that addNote returns Future<void>.
       await _service.addNote(lead: _lead, note: note);
 
-      // 2. Fetch the updated lead object from the service (which includes the new note)
       final updatedLead = await _service.getLead(leadId: _lead.id);
 
-      // 3. Update local state
       setState(() {
         if (updatedLead != null) {
-          _lead = updatedLead; // Now assigning a Lead object, fixing the error
+          _lead = updatedLead;
+          _nameController.text = _lead.name;
+          _phoneController.text = _lead.phoneNumber;
         }
       });
     } catch (e) {
       print('❌ Error adding note: $e');
-      // Handle the exception gracefully, e.g., show a snackbar
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to add note: $e')),
+      );
     }
   }
 
-  // -------------------------------------------------------------------------
-  // UI COMPONENTS
-  // -------------------------------------------------------------------------
   Widget _sectionTitle(String text) {
     return Padding(
       padding: const EdgeInsets.only(top: 20, bottom: 10),
@@ -134,6 +133,18 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
   }
 
   Widget _headerCard() {
+    final bool needsReview = _lead.needsManualReview;
+    final String callOutcome = _lead.lastCallOutcome.toUpperCase();
+
+    Color outcomeColor;
+    if (callOutcome == 'MISSED') {
+      outcomeColor = Colors.red.shade700;
+    } else if (callOutcome == 'ANSWERED') {
+      outcomeColor = Colors.green.shade700;
+    } else {
+      outcomeColor = Colors.blueGrey;
+    }
+
     return Card(
       elevation: 4,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -164,7 +175,6 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
             ),
             if (_lead.lastCallOutcome != 'none') ...[
               const SizedBox(height: 10),
-              // Display the last call outcome for context
               Text(
                 'Last Call Status: ${_lead.lastCallOutcome.toUpperCase()}',
                 style: TextStyle(
@@ -188,21 +198,19 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
     return Column(
       children: _lead.callHistory.reversed.map((call) {
         final icon = call.direction == "inbound" ? Icons.call_received : Icons.call_made;
-        final color = call.outcome == "answered" ? Colors.green : 
-                      call.outcome == "missed" ? Colors.red : 
-                      call.outcome == "rejected" ? Colors.orange : 
+        final color = call.outcome == "answered" ? Colors.green :
+                      call.outcome == "missed" ? Colors.red :
+                      call.outcome == "rejected" ? Colors.orange :
                       Colors.blue;
-        
+
         final durationText = call.durationInSeconds != null
             ? ' (${_formatDuration(call.durationInSeconds!)})'
             : '';
 
         return Card(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: ListTile(
             leading: Icon(icon, color: color),
-            // Title includes outcome and duration
             title: Text("${call.direction} – ${call.outcome.toUpperCase()}$durationText"),
             subtitle: Text(_formatDate(call.timestamp)),
           ),
@@ -219,8 +227,7 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
     return Column(
       children: _lead.notes.reversed.map((note) {
         return Card(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: ListTile(
             leading: const Icon(Icons.note),
             title: Text(note.text),
@@ -231,10 +238,6 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
     );
   }
 
-
-  // -----------------------------------------
-  // MAIN UI
-  // -----------------------------------------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -250,34 +253,28 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
           children: [
             _headerCard(),
 
-            // PHONE NUMBER (Read Only)
             _sectionTitle("Phone Number"),
             TextField(
               controller: _phoneController,
-              readOnly: true, 
-              decoration: InputDecoration(
-                filled: true,
-                fillColor: Colors.grey.shade200,
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-
-
-            // NAME (Read Only for Details Screen)
-            _sectionTitle("Name"),
-            TextField(
-              controller: TextEditingController(text: _lead.name), // Display the current name
               readOnly: true,
               decoration: InputDecoration(
                 filled: true,
                 fillColor: Colors.grey.shade200,
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               ),
             ),
 
-            // STATUS (Editable)
+            _sectionTitle("Name"),
+            TextField(
+              controller: _nameController,
+              readOnly: true,
+              decoration: InputDecoration(
+                filled: true,
+                fillColor: Colors.grey.shade200,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+
             _sectionTitle("Status"),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -300,25 +297,21 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
               ),
             ),
 
-            // CALL HISTORY
             _sectionTitle("Call History"),
             _callHistorySection(),
 
-            // NOTES
             _sectionTitle("Notes"),
             _notesSection(),
 
             const SizedBox(height: 12),
 
-            // NOTE INPUT FIELD
             TextField(
               controller: _noteController,
               minLines: 1,
               maxLines: 3,
               decoration: InputDecoration(
                 hintText: "Write a note...",
-                border:
-                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.send),
                   onPressed: _addNote,

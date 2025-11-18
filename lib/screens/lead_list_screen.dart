@@ -21,20 +21,21 @@ class LeadListScreen extends StatefulWidget {
 }
 
 class _LeadListScreenState extends State<LeadListScreen> {
-  final LeadService _service = LeadService();
+  // Use the singleton instance so cache is shared across app
+  final LeadService _service = LeadService.instance;
 
+  // mutable lists used by the UI
   List<Lead> _allLeads = [];
   List<Lead> _filteredLeads = [];
   bool _loading = true;
 
   final TextEditingController _searchCtrl = TextEditingController();
-  
+
   // State for the call filter
-  String _selectedFilter = 'All'; 
+  String _selectedFilter = 'All';
   final List<String> _filters = [
     'All',
-    // 🔥 MODIFIED FILTER
-    'Needs Review', 
+    'Needs Review',
     'Incoming',
     'Outgoing',
     'Answered',
@@ -60,32 +61,35 @@ class _LeadListScreenState extends State<LeadListScreen> {
     setState(() => _loading = true);
 
     await _service.loadLeads();
-    _allLeads = _service.getAll();
 
-    // Sort -> latest interaction first
+    // IMPORTANT: _service.getAll() may return an unmodifiable list (service cache).
+    // Copy into a mutable list before sorting/modifying.
+    final fetched = _service.getAll();
+    _allLeads = List<Lead>.from(fetched);
+
+    // Sort -> latest interaction first (mutable list sort is fine now)
     _allLeads.sort((a, b) => b.lastInteraction.compareTo(a.lastInteraction));
 
     _applySearch(); // Apply search and filter after loading
-    
+
     setState(() => _loading = false);
   }
 
   void _applySearch() {
     final query = _searchCtrl.text.toLowerCase();
-    
+
     // 1. Apply text search
     List<Lead> searchFiltered = _allLeads.where((l) {
-      return l.name.toLowerCase().contains(query) ||
-             l.phoneNumber.contains(query);
+      return l.name.toLowerCase().contains(query) || l.phoneNumber.contains(query);
     }).toList();
 
     // 2. Apply call/review filter
     _filteredLeads = searchFiltered.where((l) {
       if (_selectedFilter == 'All') return true;
 
-      // 🔥 ADVANCED FILTER: Use the explicit needsManualReview flag
+      // Use the explicit needsManualReview flag
       if (_selectedFilter == 'Needs Review') {
-          return l.needsManualReview; 
+        return l.needsManualReview;
       }
 
       // If no call history, it can't match any call-specific filters
@@ -100,15 +104,14 @@ class _LeadListScreenState extends State<LeadListScreen> {
       final lastCall = l.callHistory.last;
       if (_selectedFilter == 'Incoming' && lastCall.direction == 'inbound') return true;
       if (_selectedFilter == 'Outgoing' && lastCall.direction == 'outbound') return true;
-      
-      // If none of the specific filters matched, exclude the lead
-      return false; 
-    }).toList();
 
+      // If none of the specific filters matched, exclude the lead
+      return false;
+    }).toList();
 
     setState(() {});
   }
-  
+
   // Method to handle filter change
   void _changeFilter(String filter) {
     setState(() {
@@ -116,7 +119,6 @@ class _LeadListScreenState extends State<LeadListScreen> {
       _applySearch(); // Re-filter the list
     });
   }
-
 
   // -----------------------------------------
   // UI: STATUS CHIP (Updated Colors)
@@ -155,7 +157,7 @@ class _LeadListScreenState extends State<LeadListScreen> {
   // -----------------------------------------
   Widget _leadCard(Lead lead) {
     final bool needsReview = lead.needsManualReview;
-    
+
     // Set colors for the last call outcome chip
     Color outcomeColor = Colors.grey.shade600;
     Color outcomeBgColor = Colors.grey.shade200;
@@ -173,17 +175,11 @@ class _LeadListScreenState extends State<LeadListScreen> {
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
         // 🔥 Highlight border if review is needed
-        side: needsReview 
-            ? const BorderSide(color: _accentColor, width: 2) 
-            : BorderSide.none,
+        side: needsReview ? const BorderSide(color: _accentColor, width: 2) : BorderSide.none,
       ),
       child: ListTile(
         contentPadding: const EdgeInsets.all(12),
-        // 🔥 Custom Leading Widget for review/status
-        leading: needsReview
-            ? Icon(Icons.error_outline, color: _accentColor, size: 30)
-            : Icon(Icons.person_pin, color: _primaryColor, size: 30),
-            
+        leading: needsReview ? Icon(Icons.error_outline, color: _accentColor, size: 30) : Icon(Icons.person_pin, color: _primaryColor, size: 30),
         onTap: () {
           Navigator.push(
             context,
@@ -191,7 +187,7 @@ class _LeadListScreenState extends State<LeadListScreen> {
               builder: (_) => LeadFormScreen(
                 lead: lead,
                 autoOpenedFromCall: false,
-              ), 
+              ),
             ),
           ).then((_) => _loadLeads());
         },
@@ -213,7 +209,6 @@ class _LeadListScreenState extends State<LeadListScreen> {
               runSpacing: 4.0, // space between rows of chips
               children: [
                 _statusChip(lead.status),
-                // Display last call outcome
                 if (lead.lastCallOutcome != 'none')
                   Chip(
                     label: Text(
@@ -224,7 +219,6 @@ class _LeadListScreenState extends State<LeadListScreen> {
                     labelStyle: TextStyle(color: outcomeColor),
                     visualDensity: VisualDensity.compact,
                   ),
-                // Display Review required chip explicitly
                 if (needsReview)
                   Chip(
                     label: const Text(
@@ -267,14 +261,13 @@ class _LeadListScreenState extends State<LeadListScreen> {
             MaterialPageRoute(
               // Opens form for a new, empty lead.
               builder: (_) => LeadFormScreen(
-                lead: Lead.newLead(""), 
+                lead: Lead.newLead(""),
                 autoOpenedFromCall: false,
               ),
             ),
           ).then((_) => _loadLeads());
         },
       ),
-
       body: _loading
           ? const Center(child: CircularProgressIndicator(color: _primaryColor))
           : Column(
@@ -315,7 +308,6 @@ class _LeadListScreenState extends State<LeadListScreen> {
                     itemBuilder: (_, i) {
                       final filter = _filters[i];
                       final isSelected = _selectedFilter == filter;
-                      // 🔥 ADVANCED/PREMIUM ACTION CHIP
                       return Padding(
                         padding: const EdgeInsets.only(right: 10),
                         child: ActionChip(
@@ -335,7 +327,7 @@ class _LeadListScreenState extends State<LeadListScreen> {
                     },
                   ),
                 ),
-                
+
                 const SizedBox(height: 8),
 
                 // -------------------------
@@ -345,9 +337,9 @@ class _LeadListScreenState extends State<LeadListScreen> {
                   child: _filteredLeads.isEmpty
                       ? const Center(child: Text("No leads found matching current filters."))
                       : ListView.builder(
-                            itemCount: _filteredLeads.length,
-                            itemBuilder: (_, i) => _leadCard(_filteredLeads[i]),
-                          ),
+                          itemCount: _filteredLeads.length,
+                          itemBuilder: (_, i) => _leadCard(_filteredLeads[i]),
+                        ),
                 ),
               ],
             ),

@@ -29,18 +29,36 @@ class MainActivity : FlutterActivity() {
             CALL_EVENTS
         ).setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                com.example.call_leads_app.callservice.CallService.eventSink = events
+                try {
+                    // wire the static sink that CallService writes into
+                    com.example.call_leads_app.callservice.CallService.eventSink = events
 
-                val pendingEvent = com.example.call_leads_app.callservice.CallService.pendingInitialEvent
-                if (pendingEvent != null) {
-                    Log.d(TAG, "FLUSHING PENDING EVENT: $pendingEvent")
-                    events?.success(pendingEvent)
-                    com.example.call_leads_app.callservice.CallService.pendingInitialEvent = null
+                    // If CallService buffered an initial event earlier, flush it once
+                    val pendingEvent = com.example.call_leads_app.callservice.CallService.pendingInitialEvent
+                    if (pendingEvent != null) {
+                        Log.d(TAG, "FLUSHING PENDING EVENT: $pendingEvent")
+                        try {
+                            events?.success(pendingEvent)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error flushing pending event to Flutter: ${e.localizedMessage}")
+                        } finally {
+                            com.example.call_leads_app.callservice.CallService.pendingInitialEvent = null
+                        }
+                    }
+
+                    // NOTE: If you later add an instance-level flush method on CallService,
+                    // you can also call it here (via a broadcast or service binding) to be extra sure.
+                } catch (e: Exception) {
+                    Log.e(TAG, "onListen error: ${e.localizedMessage}", e)
                 }
             }
 
             override fun onCancel(arguments: Any?) {
-                com.example.call_leads_app.callservice.CallService.eventSink = null
+                try {
+                    com.example.call_leads_app.callservice.CallService.eventSink = null
+                } catch (e: Exception) {
+                    Log.e(TAG, "onCancel error: ${e.localizedMessage}", e)
+                }
             }
         })
 
@@ -52,7 +70,12 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "requestDialerRole" -> {
                     val ok = requestDialerRole()
-                    result.success(ok)
+                    // respond safely
+                    try {
+                        result.success(ok)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error sending method channel result: ${e.localizedMessage}")
+                    }
                 }
                 else -> result.notImplemented()
             }
@@ -75,19 +98,19 @@ class MainActivity : FlutterActivity() {
             return false
         }
 
-        if (!roleManager.isRoleHeld(RoleManager.ROLE_DIALER)) {
-            val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_DIALER)
-            try {
-                // startActivityForResult is deprecated but works and avoids registerForActivityResult binding issues
+        return try {
+            if (!roleManager.isRoleHeld(RoleManager.ROLE_DIALER)) {
+                val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_DIALER)
+                // startActivityForResult is still acceptable here
                 startActivityForResult(intent, REQUEST_ROLE_DIALER)
-                return true
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to launch role request intent: ${e.localizedMessage}")
-                return false
+                true
+            } else {
+                Log.d(TAG, "Already holds ROLE_DIALER")
+                true
             }
-        } else {
-            Log.d(TAG, "Already holds ROLE_DIALER")
-            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch role request intent: ${e.localizedMessage}", e)
+            false
         }
     }
 
